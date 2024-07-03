@@ -27,8 +27,8 @@ def _instantiate_node(node: DictConfig, *args: Tuple[Any, ...]):
     """
     if _has_component(node):
         _component_ = _get_component_from_path(node.get("_component_"))
-        print("Component is ")
-        print(_component_)
+        # print("Component is ")
+        # print(_component_)
         kwargs = {k: v for k, v in node.items() if k != "_component_"}
         return _create_component(_component_, args, kwargs)
     else:
