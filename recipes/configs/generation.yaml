@@ -5,17 +5,22 @@
 
 # Model arguments
 model:
-  _component_: torchtune.models.llama2.llama2_7b
+  _component_: torchtune.models.llama3.lora_llama3_8b
+  lora_attn_modules: ['q_proj', 'v_proj']
+  apply_lora_to_mlp: False
+  apply_lora_to_output: False
+  lora_rank: 8
+  lora_alpha: 16
 
 checkpointer:
-  _component_: torchtune.utils.FullModelHFCheckpointer
-  checkpoint_dir: /tmp/Llama-2-7b-hf/
+  _component_: torchtune.utils.FullModelMetaCheckpointer
+  checkpoint_dir: /tmp/Meta-Llama-3-8B-Instruct/
   checkpoint_files: [
-    pytorch_model-00001-of-00002.bin,
-    pytorch_model-00002-of-00002.bin,
+    meta_model_0.pt,
   ]
-  output_dir: /tmp/Llama-2-7b-hf/
-  model_type: LLAMA2
+  adapter_checkpoint: adapter_0.pt
+  output_dir: /tmp/Meta-Llama-3-8B-Instruct/output/
+  model_type: LLAMA3
 
 device: cuda
 dtype: bf16
@@ -24,15 +29,22 @@ seed: 1234
 
 # Tokenizer arguments
 tokenizer:
-  _component_: torchtune.models.llama2.llama2_tokenizer
-  path: /tmp/Llama-2-7b-hf/tokenizer.model
+  _component_: torchtune.models.llama3.llama3_tokenizer
+  path: /tmp/Meta-Llama-3-8B-Instruct/original/tokenizer.model
 
 # Generation arguments; defaults taken from gpt-fast
 prompt: "Hello, my name is"
 instruct_template: null
 chat_format: null
-max_new_tokens: 300
+max_new_tokens: 50
 temperature: 0.6 # 0.8 and 0.6 are popular values to try
 top_k: 300
 
 quantizer: null
+
+# Dataset and Sampler
+dataset:
+  _component_: torchtune.datasets.hellaswag_dataset
+  split: "test"
+shuffle: False
+batch_size: 1

@@ -20,31 +20,16 @@ Modeling Components and Building Blocks
     TransformerDecoderLayer
     TransformerDecoder
 
-Base Tokenizers
----------------
-Base tokenizers are tokenizer models that perform the direct encoding of text
-into token IDs and decoding of token IDs into text. These are typically `byte pair
-encodings <https://en.wikipedia.org/wiki/Byte_pair_encoding>`_ that underlie the
-model specific tokenizers.
+Tokenizers
+------------------------
 
 .. autosummary::
     :toctree: generated/
     :nosignatures:
 
-    tokenizers.SentencePieceBaseTokenizer
-    tokenizers.TikTokenBaseTokenizer
-
-Tokenizer Utilities
--------------------
-These are helper methods that can be used by any tokenizer.
-
-.. autosummary::
-    :toctree: generated/
-    :nosignatures:
-
-    tokenizers.tokenize_messages_no_special_tokens
-    tokenizers.parse_hf_tokenizer_json
-
+    tokenizers.SentencePieceTokenizer
+    tokenizers.TikTokenTokenizer
+    tokenizers.Tokenizer
 
 PEFT Components
 ---------------

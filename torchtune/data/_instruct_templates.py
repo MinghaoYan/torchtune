@@ -37,6 +37,37 @@ class InstructTemplate(ABC):
         pass
 
 
+class HellaswagTemplate(InstructTemplate):
+
+    template = """You are given a full sentence and the beginning of the following sentence. Please determine the most appropriate ending.
+
+Your possible options are 0, 1, 2, 3, which represents the indices of the possible endings list.
+
+### Context:
+{}
+
+### Endings:
+{}
+
+### Label:
+{}"""
+    
+    @classmethod
+    def format(
+        cls,  sample: Mapping[str, Any], column_map: Optional[Dict[str, str]] = None
+    ) -> str:
+
+        column_map = column_map or {}
+        key_ctx = column_map.get("ctx", "ctx")
+        key_endings = column_map.get("endings", "endings")
+        key_label = column_map.get("label", "label")
+
+        prompt = cls.template.format(sample[key_ctx], sample[key_endings], sample[key_label])
+        return prompt
+
+    
+
+
 class AlpacaInstructTemplate(InstructTemplate):
     """
     Prompt template for Alpaca-style datasets. Template prompt changes slightly depending

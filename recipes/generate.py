@@ -6,10 +6,10 @@
 import itertools
 import sys
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from torch import nn
 
 from torchtune import config, utils
@@ -18,6 +18,9 @@ from torchtune.data import ChatFormat, InstructTemplate, Message
 
 logger = utils.get_logger("DEBUG")
 
+from torch.utils.data import DataLoader, DistributedSampler
+from torchtune.datasets import ConcatDataset
+from functools import partial
 
 class InferenceRecipe:
     """
@@ -52,11 +55,21 @@ class InferenceRecipe:
             # FullModelTorchTuneCheckpointer
             ckpt_dict = checkpointer.load_checkpoint(weights_only=False)
 
+        combined_state_dict = {**ckpt_dict[utils.MODEL_KEY], **ckpt_dict[utils.ADAPTER_KEY]}
+        # print(ckpt_dict)
         self._model = self._setup_model(
             model_cfg=cfg.model,
-            model_state_dict=ckpt_dict[utils.MODEL_KEY],
+            model_state_dict=combined_state_dict,
         )
         self._tokenizer = config.instantiate(cfg.tokenizer)
+
+        # Dataloader depends on the tokenizer and loss_fn and should be
+        # setup after all of these are setup
+        self._sampler, self._dataloader = self._setup_data(
+            cfg_dataset=cfg.dataset,
+            shuffle=cfg.shuffle,
+            batch_size=cfg.batch_size,
+        )
 
     def _setup_model(
         self,
@@ -69,7 +82,7 @@ class InferenceRecipe:
         if self._quantization_mode is not None:
             model = self._quantizer.quantize(model)
             model = model.to(device=self._device, dtype=self._dtype)
-
+        # print(model_state_dict)
         model.load_state_dict(model_state_dict)
 
         # Validate model was loaded in with the expected dtype.
@@ -127,28 +140,72 @@ class InferenceRecipe:
                 chat_format = _get_component_from_path(chat_format)
                 messages = chat_format.format(messages)
             return self._tokenizer.tokenize_messages(messages)[0]
+        
+    
+    def _setup_data(
+        self,
+        cfg_dataset: DictConfig,
+        shuffle: bool,
+        batch_size: int,
+    ) -> Tuple[DistributedSampler, DataLoader]:
+        """
+        All data related setup happens here. Currently this recipe only supports
+        Map-style Datasets which fit into memory and an option for random shuffling.
+        Samplers, iterable datasets, and streaming datasets are not supported.
+        """
+        if isinstance(cfg_dataset, ListConfig):
+            datasets = [
+                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer)
+                for single_cfg_dataset in cfg_dataset
+            ]
+            ds = ConcatDataset(datasets=datasets)
+            packed = False
+        else:
+            ds = config.instantiate(cfg_dataset, tokenizer=self._tokenizer)
+            packed = cfg_dataset.get("packed", False)
+
+        sampler = DistributedSampler(
+            ds,
+            num_replicas=1,
+            rank=0,
+            shuffle=shuffle,
+            seed=0,
+        )
+        dataloader = DataLoader(
+            dataset=ds,
+            sampler=sampler,
+            batch_size=batch_size,
+            collate_fn=partial(
+                utils.padded_collate,
+                padding_idx=self._tokenizer.pad_id,
+            )
+            if not packed
+            else None,
+        )
+
+        logger.info("Dataset and Sampler are initialized.")
+
+        return sampler, dataloader
 
     @torch.no_grad()
     def generate(self, cfg: DictConfig):
-        tokens = self.convert_prompt_to_tokens(
-            cfg.prompt, cfg.get("chat_format", None), cfg.get("instruct_template", None)
-        )
-        prompt = torch.tensor(tokens, dtype=torch.int, device=self._device)
+        # tokens = self.convert_prompt_to_tokens(
+        #     cfg.prompt, cfg.get("chat_format", None), cfg.get("instruct_template", None)
+        # )
+        # prompt = torch.tensor(tokens, dtype=torch.int, device=self._device)
 
-        custom_generate_next_token = None
+        for _, batch in enumerate(self._dataloader):
 
-        # since quantized model uses torch.compile to get speedup, it needs a warm up / prefill run
-        # to get the accurate performance measurement
-        if self._quantization_mode is not None:
-            logger.info("Starting compilation to improve generation performance ...")
-            custom_generate_next_token = torch.compile(
-                utils.generate_next_token, mode="max-autotune", fullgraph=True
-            )
+            # Both are shape [b, s]
+            tokens = batch["tokens"].to(self._device)
+
+            custom_generate_next_token = None
+
             t0 = time.perf_counter()
-            _ = utils.generate(
+            generated_tokens = utils.generate(
                 model=self._model,
-                prompt=prompt,
-                max_generated_tokens=2,
+                prompt=tokens,
+                max_generated_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_k=cfg.top_k,
                 stop_tokens=self._tokenizer.stop_tokens,
@@ -156,39 +213,25 @@ class InferenceRecipe:
                 custom_generate_next_token=custom_generate_next_token,
             )
             t = time.perf_counter() - t0
-            logger.info(f"Warmup run for quantized model takes: {t:.02f} sec")
 
-        t0 = time.perf_counter()
-        generated_tokens = utils.generate(
-            model=self._model,
-            prompt=prompt,
-            max_generated_tokens=cfg.max_new_tokens,
-            temperature=cfg.temperature,
-            top_k=cfg.top_k,
-            stop_tokens=self._tokenizer.stop_tokens,
-            pad_id=self._tokenizer.pad_id,
-            custom_generate_next_token=custom_generate_next_token,
-        )
-        t = time.perf_counter() - t0
+            logger.info(self._tokenizer.decode(generated_tokens[0]))
 
-        logger.info(self._tokenizer.decode(generated_tokens[0]))
+            model_size = sum(
+                [
+                    p.numel() * p.dtype.itemsize
+                    for p in itertools.chain(
+                        self._model.parameters(), self._model.buffers()
+                    )
+                ]
+            )
 
-        model_size = sum(
-            [
-                p.numel() * p.dtype.itemsize
-                for p in itertools.chain(
-                    self._model.parameters(), self._model.buffers()
-                )
-            ]
-        )
-
-        tokens_generated = len(generated_tokens[0]) - prompt.size(0)
-        tokens_sec = tokens_generated / t
-        logger.info(
-            f"Time for inference: {t:.02f} sec total, {tokens_sec:.02f} tokens/sec"
-        )
-        logger.info(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")
-        logger.info(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
+            tokens_generated = len(generated_tokens[0]) - tokens.size(0)
+            tokens_sec = tokens_generated / t
+            logger.info(
+                f"Time for inference: {t:.02f} sec total, {tokens_sec:.02f} tokens/sec"
+            )
+            logger.info(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")
+            logger.info(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
 
 
 @config.parse

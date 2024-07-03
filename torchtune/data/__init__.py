@@ -18,6 +18,7 @@ from torchtune.data._instruct_templates import (
     InstructTemplate,
     StackExchangedPairedTemplate,
     SummarizeTemplate,
+    HellaswagTemplate,
 )
 from torchtune.data._types import Message
 from torchtune.data._utils import truncate, validate_messages
@@ -38,4 +39,5 @@ __all__ = [
     "Message",
     "validate_messages",
     "StackExchangedPairedTemplate",
+    "HellaswagTemplate"
 ]
