@@ -14,6 +14,7 @@ from ._model_builders import (  # noqa
     lora_llama3_8b,
     qlora_llama3_70b,
     qlora_llama3_8b,
+    concurrent_lora_llama3_8b,
 )
 from ._model_utils import scale_hidden_dim_for_mlp
 
@@ -28,4 +29,5 @@ __all__ = [
     "qlora_llama3_8b",
     "qlora_llama3_70b",
     "scale_hidden_dim_for_mlp",
+    "concurrent_lora_llama3_8b",
 ]

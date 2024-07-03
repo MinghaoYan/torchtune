@@ -19,6 +19,9 @@ from torchtune.modules import (
     RotaryPositionalEmbeddings,
     TransformerDecoder,
     TransformerDecoderLayer,
+    ConcurrentTransformerDecoder,
+    ConcurrentTransformerDecoderLayer,
+    ConcurrentCausalSelfAttention,
 )
 
 from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
@@ -416,7 +419,7 @@ def lora_llama3_mlp(
 
 # -----------------------------Set up multiple LoRA layers--------------------------------
 
-def concuurent_lora_llama3(
+def concurrent_lora_llama3(
     lora_attn_modules: List[str],
     apply_lora_to_mlp: bool = False,
     apply_lora_to_output: bool = False,
@@ -438,7 +441,7 @@ def concuurent_lora_llama3(
     lora_dropout: float = 0.0,
     # Quantization args
     quantize_base: bool = False,
-) -> TransformerDecoder:
+) -> ConcurrentTransformerDecoder:
     """
     Return a version of Llama3 (an instance of :func:`~torchtune.modules.TransformerDecoder`)
     with LoRA applied based on the passed in configuration.
@@ -482,7 +485,7 @@ def concuurent_lora_llama3(
     
     assert len(lora_rank) == len(lora_alpha), "Length of lora_rank and lora_alpha are different."
 
-    self_attn = lora_llama3_self_attention(
+    self_attn = concurrent_lora_llama3_self_attention(
         lora_modules=lora_attn_modules,
         embed_dim=embed_dim,
         num_heads=num_heads,
@@ -509,7 +512,7 @@ def concuurent_lora_llama3(
     else:
         mlp = llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)
 
-    layer = TransformerDecoderLayer(
+    layer = ConcurrentTransformerDecoderLayer(
         attn=self_attn,
         mlp=mlp,
         sa_norm=RMSNorm(dim=embed_dim, eps=norm_eps),
@@ -519,11 +522,11 @@ def concuurent_lora_llama3(
     tok_embeddings = nn.Embedding(vocab_size, embed_dim)
 
     output_proj = (
-        LoRALinear(embed_dim, vocab_size, rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)
+        ConcurrentLoRALinear(embed_dim, vocab_size, rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)
         if apply_lora_to_output
         else nn.Linear(embed_dim, vocab_size, bias=False)
     )
-    model = TransformerDecoder(
+    model = ConcurrentTransformerDecoder(
         tok_embeddings=tok_embeddings,
         layer=layer,
         num_layers=num_layers,
@@ -553,11 +556,11 @@ def concurrent_lora_llama3_self_attention(
     attn_dropout: float = 0.0,
     rope_base: float = 500000.0,
     # LoRA args
-    lora_rank: int,
-    lora_alpha: float,
+    lora_rank: List[int],
+    lora_alpha: List[float],
     lora_dropout: float = 0.0,
     quantize_base: bool = False,
-) -> CausalSelfAttention:
+) -> ConcurrentCausalSelfAttention:
     """
     Return an instance of :func:`~torchtune.modules.CausalSelfAttention` with LoRA
     applied to a subset of its linear layers
@@ -645,7 +648,7 @@ def concurrent_lora_llama3_self_attention(
         else nn.Linear(embed_dim, embed_dim, bias=False)
     )
     rope = RotaryPositionalEmbeddings(dim=head_dim, max_seq_len=max_seq_len, base=rope_base)
-    self_attn = CausalSelfAttention(
+    self_attn = ConcurrentCausalSelfAttention(
         embed_dim=embed_dim,
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,

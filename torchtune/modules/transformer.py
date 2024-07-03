@@ -463,6 +463,8 @@ class ConcurrentTransformerDecoder(nn.Module):
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
 
+        outputs = [h]
+
         for layer_idx, layer in enumerate(self.layers):
             # Collect LoRA outputs for the current layer
             all_lora_outputs = []
@@ -470,12 +472,23 @@ class ConcurrentTransformerDecoder(nn.Module):
                 for lora in self.lora_layers[layer_idx]:
                     lora_out = lora(h)
                     all_lora_outputs.append(lora_out)
+            
+            # Process each path through the layer
+            new_outputs = []
+            for output in outputs:
+                # shape: [b, s, d]
+                layer_outputs = layer(output, all_lora_outputs, mask=mask, input_pos=input_pos)
+                new_outputs.extend(layer_outputs)
+            outputs = new_outputs
+
+        # Apply norm and output projection to each path
+        final_outputs = []
+        for output in outputs:
             # shape: [b, s, d]
-            h = layer(h, all_lora_outputs, mask=mask, input_pos=input_pos)
+            h = self.norm(output)
 
-        # shape: [b, s, d]
-        h = self.norm(h)
+            # shape: [b, s, out_dim] - out_dim is usually the vocab size
+            final_output = self.output(h).float()
+            final_outputs.append(final_output)
 
-        # shape: [b, s, out_dim] - out_dim is usually the vocab size
-        output = self.output(h).float()
-        return output
+        return final_outputs

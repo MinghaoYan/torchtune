@@ -42,7 +42,7 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 
-class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
+class LoRAFinetuneMultiSyncRecipeDistributed(FTRecipeInterface):
     """
     Distributed LoRA finetuning recipe for dense transformer-based LLMs such as Llama2. This recipe supports
     distributed training and can be run on a single node (1 to 8 GPUs).
@@ -229,6 +229,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         )
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
+        # print(self._model)
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
             opt_state_dict=checkpoint_dict[utils.OPT_KEY]
@@ -364,7 +365,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         if self._is_rank_zero:
             log.info("FSDP is enabled. Instantiating Model on CPU for Rank 0 ...")
             init_start = time.perf_counter()
-
+            print(cfg_model)
             with utils.set_default_dtype(self._dtype):
                 model = config.instantiate(cfg_model)
 
@@ -407,6 +408,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         # LoRA hyper-params needed for merging weights while saving checkpoints
         self._lora_rank = cfg_model.lora_rank
         self._lora_alpha = cfg_model.lora_alpha
+
+        # print(self._lora_rank, self._lora_alpha)
+        # print(model)
 
         # Note: this needs to be set before wrapping with FSDP
         self.adapter_params = get_adapter_params(model)
@@ -745,9 +749,9 @@ def recipe_main(cfg: DictConfig) -> None:
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
 
-    config.log_config(recipe_name="LoRAFinetuneRecipeDistributed", cfg=cfg)
+    config.log_config(recipe_name="LoRAFinetuneMultiSyncRecipeDistributed", cfg=cfg)
 
-    recipe = LoRAFinetuneRecipeDistributed(cfg=cfg)
+    recipe = LoRAFinetuneMultiSyncRecipeDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
     recipe.cleanup()

@@ -174,8 +174,8 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
         self,
         in_dim: int,
         out_dim: int,
-        rank: int,
-        alpha: float,
+        rank: List[int],
+        alpha: List[float],
         dropout: float = 0.0,
         use_bias: bool = False,
         quantize_base: bool = False,
@@ -197,8 +197,8 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
             "bias", nn.Parameter(bias) if bias is not None else None
         )
         self.dropout = nn.Dropout(p=dropout)
-        self.lora_a = nn.ModuleList([nn.Linear(in_features=in_dim, out_features=rank[idx], bias=False) for idx, rank in self.rank])
-        self.lora_b = nn.ModuleList([nn.Linear(in_features=rank[idx], out_features=out_dim, bias=False) for idx, rank in self.rank])
+        self.lora_a = nn.ModuleList([nn.Linear(in_features=in_dim, out_features=lora_rank, bias=False) for lora_rank in self.rank])
+        self.lora_b = nn.ModuleList([nn.Linear(in_features=lora_rank, out_features=out_dim, bias=False) for lora_rank in self.rank])
         self.merged = False
         # Note: FSDP's meta device initialization contract assumes that a module's
         # reset_parameters method only initializes its own parameters (i.e. no child
@@ -213,8 +213,8 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
     def initialize_parameters(self):
         # Initialize as in
         # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
-        _lora_a_init_params(self.lora_a)
-        _lora_b_init_params(self.lora_b)
+        _concurrent_lora_a_init_params(self.lora_a)
+        _concurrent_lora_b_init_params(self.lora_b)
 
     def _create_weight_and_bias(self):
         """
@@ -382,3 +382,20 @@ class AsyncLoRALinear(nn.Module, AdapterModule):
             lora_after_a = self.lora_a[idx](self.dropout(x))
             lora_out.append((self.alpha[idx] / self.rank[idx]) * self.lora_b[idx](lora_after_a))
         return [out + l for l in lora_out]
+    
+
+def _concurrent_lora_a_init_params(x: nn.Linear) -> None:
+    """
+    Initialize LoRA A weight to Kaiming uniform.
+    """
+    for lora_module in x:
+        nn.init.kaiming_uniform_(lora_module.weight, a=math.sqrt(5))
+
+
+def _concurrent_lora_b_init_params(x: nn.Linear) -> None:
+    """
+    Initialize LoRA B weight to zeros.
+    """
+    for lora_module in x:
+        nn.init.zeros_(lora_module.weight)
+    
