@@ -220,11 +220,14 @@ class CausalSelfAttention(nn.Module):
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
         # manual implementation of attention
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:,:,:seq_len,:seq_len] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        output = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        output = nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,
+            dropout_p=self.attn_dropout,
+            is_causal=self.kv_cache is None and mask is None,
+        )
 
         # reshape the output to be the same shape as the input
         output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
