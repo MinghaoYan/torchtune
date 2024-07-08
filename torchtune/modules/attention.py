@@ -6,6 +6,7 @@
 
 from typing import Optional, List, Union
 
+import torch
 from torch import nn, Tensor
 from torchtune.modules.kv_cache import KVCache
 from torch.nn import functional as F
@@ -387,7 +388,7 @@ class ConcurrentCausalSelfAttention(nn.Module):
                 f"than max_seq_len ({self.max_seq_len})"
             )
         
-        def apply_attention(x: Tensor) -> Tensor:
+        def apply_attention(x: Tensor, mask: Optional[Tensor]) -> Tensor:
             # q has shape [b, s, num_heads * head_dim]
             # k has shape [b, s, num_kv_heads * head_dim]
             # v has shape [b, s, num_kv_heads * head_dim]
@@ -398,19 +399,19 @@ class ConcurrentCausalSelfAttention(nn.Module):
             # number of queries per key/value
             q_per_kv = self.num_heads // self.num_kv_heads
             
-            def convert_list_or_unsqueeze(x: Union(Tensor, List[Tensor])):
+            def convert_list_or_unsqueeze(x: Union[Tensor, List[Tensor]]):
                 if isinstance(x, list):
                     x_len = len(x)
                     x = torch.stack(x, dim=0)
                 else:
                     x_len = 1
-                    x = torch.unsqueeze(dim=0)
-                return x_len
+                    x = torch.unsqueeze(x, dim=0)
+                return x_len, x
             
             # Convert and stack the results of a list of lora adapters
-            q_len = convert_list_or_unsqueeze(q)
-            k_len = convert_list_or_unsqueeze(k)
-            v_len = convert_list_or_unsqueeze(v)
+            q_len, q = convert_list_or_unsqueeze(q)
+            k_len, k = convert_list_or_unsqueeze(k)
+            v_len, v = convert_list_or_unsqueeze(v)
 
             # Find the lengths of lora adapters and expand accordingly
             max_len = max(q_len, k_len, v_len)
@@ -422,13 +423,13 @@ class ConcurrentCausalSelfAttention(nn.Module):
             if v_len < max_len:
                 v = v.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
 
-            new_bsz = max_len*bsz
+            new_bsz = max_len * bsz
             # q: [b, s, n_kv, q_per_kv, h_d]
             # k: [b, s, n_kv, 1, h_d]
             # v: [b, s, n_kv, 1, h_d]
-            q = q.view(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-            k = k.view(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
-            v = v.view(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+            q = q.reshape(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            k = k.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+            v = v.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
 
             # if needed, expand the key and value tensors to have the same shape
             # as the query tensor by copying values across the relevant dim
@@ -481,6 +482,6 @@ class ConcurrentCausalSelfAttention(nn.Module):
         # if isinstance(self.v_proj, list):
         #     num_v = len(self.v_proj)
         
-        outputs = apply_attention(x)
+        outputs = apply_attention(x, mask)
 
         return outputs
