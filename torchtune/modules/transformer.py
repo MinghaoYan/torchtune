@@ -273,7 +273,7 @@ class ConcurrentTransformerDecoderLayer(nn.Module):
 
     def forward(
         self,
-        x: Union[Tensor, List[Tensor]],
+        x: Tensor,
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
@@ -305,6 +305,10 @@ class ConcurrentTransformerDecoderLayer(nn.Module):
         # [b, s, d]
         # Norm applied before self-attention
         attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
+
+        # Expand x for multiple LoRA adapters
+        if attn_out.shape(0) > x.shape(0):
+            x = x.expand(attn_out.shape(0), -1, -1)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
