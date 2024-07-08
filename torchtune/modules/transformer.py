@@ -307,8 +307,9 @@ class ConcurrentTransformerDecoderLayer(nn.Module):
         attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
 
         # Expand x for multiple LoRA adapters
-        if attn_out.shape(0) > x.shape(0):
-            x = x.expand(attn_out.shape(0), -1, -1)
+        if attn_out.shape[0] > x.shape[0]:
+            repeat_factor = attn_out.shape[0] // x.shape[0]
+            x = x.repeat(repeat_factor, 1, 1)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
