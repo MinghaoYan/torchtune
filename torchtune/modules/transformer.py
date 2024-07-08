@@ -304,27 +304,17 @@ class ConcurrentTransformerDecoderLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        # Apply attention to the sum of final_output and each lora_output
-        if isinstance(x, list):
-            normalized_x = [self.sa_norm(elem) for elem in x]
-            attn_outs = self.attn(normalized_x, mask=mask, input_pos=input_pos)
-        else:
-            attn_outs = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
+        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
 
-        # Process each attention output separately
-        outputs = []
-        for attn_out in attn_outs:
-            # Residual connection; shape: [batch_size, seq_length, embed_dim]
-            h = attn_out + x
+        # Residual connection; shape: [batch_size, seq_length, embed_dim]
+        h = attn_out + x
 
-            # Norm applied before the feedforward layer
-            mlp_out = self.mlp(self.mlp_norm(h))
+        # Norm applied before the feedforward layer
+        mlp_out = self.mlp(self.mlp_norm(h))
 
-            # Residual connection; shape: [batch_size, seq_length, embed_dim]
-            out = h + mlp_out
-            outputs.append(out)
-        
-        return outputs
+        # Residual connection; shape: [batch_size, seq_length, embed_dim]
+        out = h + mlp_out
+        return out
 
 
 class ConcurrentTransformerDecoder(nn.Module):
@@ -470,45 +460,9 @@ class ConcurrentTransformerDecoder(nn.Module):
             # shape: [b, s, d]
             h = layer(h, mask=mask, input_pos=input_pos)
 
-        # Apply norm and output projection to each path
-        final_outputs = []
-        for output in h:
-            # shape: [b, s, d]
-            h = self.norm(output)
+        # shape: [b, s, d]
+        h = self.norm(h)
 
-            # shape: [b, s, out_dim] - out_dim is usually the vocab size
-            final_output = self.output(h).float()
-            final_outputs.append(final_output)
-
-        return final_outputs
-
-
-        # # input tensor of shape [b, s]
-        # bsz, seq_len = tokens.shape
-
-        # # shape: [b, s, d]
-        # h = self.tok_embeddings(tokens)
-
-        # if self.causal_mask is not None:
-        #     if input_pos is None:
-        #         raise ValueError(
-        #             "Caches are setup, but the position of input token is missing"
-        #         )
-        #     if mask is not None:
-        #         raise ValueError(
-        #             "An attention mask was set. Cannot use a non-causal mask for inference"
-        #         )
-        #     # shape: [1, input_pos_len, m_s]
-        #     # in most cases input_pos_len should be 1
-        #     mask = self.causal_mask[None, input_pos]
-
-        # for layer in self.layers:
-        #     # shape: [b, s, d]
-        #     h = layer(h, mask=mask, input_pos=input_pos)
-
-        # # shape: [b, s, d]
-        # h = self.norm(h)
-
-        # # shape: [b, s, out_dim] - out_dim is usually the vocab size
-        # output = self.output(h).float()
-        # return output
+        # shape: [b, s, out_dim] - out_dim is usually the vocab size
+        output = self.output(h).float()
+        return output
