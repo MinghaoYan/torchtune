@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional, List
+from typing import Optional, List, Union
 
 from torch import nn, Tensor
 from torchtune.modules.kv_cache import KVCache
@@ -339,9 +339,7 @@ class ConcurrentCausalSelfAttention(nn.Module):
 
     def forward(
         self,
-        x: Tensor,
-        final_output: Tensor,
-        all_lora_outputs: List[List[Tensor]],
+        x: Union[Tensor, List[Tensor]],
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
@@ -399,26 +397,51 @@ class ConcurrentCausalSelfAttention(nn.Module):
 
             # number of queries per key/value
             q_per_kv = self.num_heads // self.num_kv_heads
+            
+            def convert_list_or_unsqueeze(x: Union(Tensor, List[Tensor])):
+                if isinstance(x, list):
+                    x_len = len(x)
+                    x = torch.stack(x, dim=0)
+                else:
+                    x_len = 1
+                    x = torch.unsqueeze(dim=0)
+                return x_len
+            
+            # Convert and stack the results of a list of lora adapters
+            q_len = convert_list_or_unsqueeze(q)
+            k_len = convert_list_or_unsqueeze(k)
+            v_len = convert_list_or_unsqueeze(v)
 
+            # Find the lengths of lora adapters and expand accordingly
+            max_len = max(q_len, k_len, v_len)
+
+            if q_len < max_len:
+                q = q.expand(max_len, bsz, seq_len, self.num_heads * self.head_dim)
+            if k_len < max_len:
+                k = k.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
+            if v_len < max_len:
+                v = v.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
+
+            new_bsz = max_len*bsz
             # q: [b, s, n_kv, q_per_kv, h_d]
             # k: [b, s, n_kv, 1, h_d]
             # v: [b, s, n_kv, 1, h_d]
-            q = q.view(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-            k = k.view(bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
-            v = v.view(bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+            q = q.view(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            k = k.view(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+            v = v.view(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
 
             # if needed, expand the key and value tensors to have the same shape
             # as the query tensor by copying values across the relevant dim
             if self.num_heads != self.num_kv_heads:
-                k = k.expand(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-                v = v.expand(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+                k = k.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+                v = v.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
 
             # llama2 applies the RoPE embeddings on tensors with shape
             # [b, s, n_h, h_d]
             # Reshape the tensors before we apply RoPE
-            q = q.reshape(bsz, seq_len, -1, self.head_dim)
-            k = k.reshape(bsz, seq_len, -1, self.head_dim)
-            v = v.reshape(bsz, seq_len, -1, self.head_dim)
+            q = q.reshape(new_bsz, seq_len, -1, self.head_dim)
+            k = k.reshape(new_bsz, seq_len, -1, self.head_dim)
+            v = v.reshape(new_bsz, seq_len, -1, self.head_dim)
 
             # Apply positional embeddings
             q = self.pos_embeddings(q, input_pos=input_pos)
@@ -446,13 +469,18 @@ class ConcurrentCausalSelfAttention(nn.Module):
             output = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
 
             # reshape the output to be the same shape as the input
-            output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+            output = output.transpose(1, 2).contiguous().view(new_bsz, seq_len, -1)
             return self.output_proj(output)
 
-        outputs = []
-        for lora_outputs in all_lora_outputs:
-            for lora_output in lora_outputs:
-                combined_output = final_output + lora_output
-                outputs.append(apply_attention(combined_output))
+        # Check the length of each q,k,v matrices as LoRA may only be applied to selected layers.
+        # num_q = num_k = num_v = -1
+        # if isinstance(self.q_proj, list):
+        #     num_q = len(self.q_proj)
+        # if isinstance(self.k_proj, list):
+        #     num_k = len(self.k_proj)
+        # if isinstance(self.v_proj, list):
+        #     num_v = len(self.v_proj)
+        
+        outputs = apply_attention(x)
 
         return outputs

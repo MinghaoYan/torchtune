@@ -259,7 +259,7 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
         if self.disabled:
             return out
         lora_out = []
-        for idx in range(len(self.rank)):
+        for idx in range(len(self.lora_a)):
             lora_after_a = self.lora_a[idx](self.dropout(x))
             lora_out.append((self.alpha[idx] / self.rank[idx]) * self.lora_b[idx](lora_after_a))
         return [out + l for l in lora_out]

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
-from typing import Optional, List
+from typing import Optional, List, Union
 
 import torch
 from torch import nn, Tensor
@@ -273,8 +273,7 @@ class ConcurrentTransformerDecoderLayer(nn.Module):
 
     def forward(
         self,
-        x: Tensor,
-        all_lora_outputs: List[Tensor],
+        x: Union[Tensor, List[Tensor]],
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
@@ -306,7 +305,11 @@ class ConcurrentTransformerDecoderLayer(nn.Module):
         # [b, s, d]
         # Norm applied before self-attention
         # Apply attention to the sum of final_output and each lora_output
-        attn_outs = self.attn(self.sa_norm(x), all_lora_outputs, mask=mask, input_pos=input_pos)
+        if isinstance(x, list):
+            normalized_x = [self.sa_norm(elem) for elem in x]
+            attn_outs = self.attn(normalized_x, mask=mask, input_pos=input_pos)
+        else:
+            attn_outs = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
 
         # Process each attention output separately
         outputs = []
@@ -463,27 +466,13 @@ class ConcurrentTransformerDecoder(nn.Module):
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
 
-        outputs = [h]
-
-        for layer_idx, layer in enumerate(self.layers):
-            # Collect LoRA outputs for the current layer
-            all_lora_outputs = []
-            if self.lora_layers[layer_idx] is not None:
-                for lora in self.lora_layers[layer_idx]:
-                    lora_out = lora(h)
-                    all_lora_outputs.append(lora_out)
-            
-            # Process each path through the layer
-            new_outputs = []
-            for output in outputs:
-                # shape: [b, s, d]
-                layer_outputs = layer(output, all_lora_outputs, mask=mask, input_pos=input_pos)
-                new_outputs.extend(layer_outputs)
-            outputs = new_outputs
+        for layer in self.layers:
+            # shape: [b, s, d]
+            h = layer(h, mask=mask, input_pos=input_pos)
 
         # Apply norm and output projection to each path
         final_outputs = []
-        for output in outputs:
+        for output in h:
             # shape: [b, s, d]
             h = self.norm(output)
 
@@ -492,3 +481,34 @@ class ConcurrentTransformerDecoder(nn.Module):
             final_outputs.append(final_output)
 
         return final_outputs
+
+
+        # # input tensor of shape [b, s]
+        # bsz, seq_len = tokens.shape
+
+        # # shape: [b, s, d]
+        # h = self.tok_embeddings(tokens)
+
+        # if self.causal_mask is not None:
+        #     if input_pos is None:
+        #         raise ValueError(
+        #             "Caches are setup, but the position of input token is missing"
+        #         )
+        #     if mask is not None:
+        #         raise ValueError(
+        #             "An attention mask was set. Cannot use a non-causal mask for inference"
+        #         )
+        #     # shape: [1, input_pos_len, m_s]
+        #     # in most cases input_pos_len should be 1
+        #     mask = self.causal_mask[None, input_pos]
+
+        # for layer in self.layers:
+        #     # shape: [b, s, d]
+        #     h = layer(h, mask=mask, input_pos=input_pos)
+
+        # # shape: [b, s, d]
+        # h = self.norm(h)
+
+        # # shape: [b, s, out_dim] - out_dim is usually the vocab size
+        # output = self.output(h).float()
+        # return output
