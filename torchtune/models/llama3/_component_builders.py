@@ -26,7 +26,7 @@ from torchtune.modules import (
 
 from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
 
-from torchtune.modules.peft import LORA_ATTN_MODULES, LoRALinear, ConcurrentLoRALinear, AsyncLoRALinear
+from torchtune.modules.peft import LORA_ATTN_MODULES, LoRALinear, ConcurrentLoRALinear
 
 """
 Component builders for the Llama3 model and popular variants such as LoRA.

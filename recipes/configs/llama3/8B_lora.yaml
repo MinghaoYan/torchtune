@@ -47,7 +47,7 @@ dataset:
   _component_: torchtune.datasets.hellaswag_dataset
 seed: null
 shuffle: True
-batch_size: 2
+batch_size: 4
 
 # Optimizer and Scheduler
 optimizer:
