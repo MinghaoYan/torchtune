@@ -28,8 +28,8 @@ model:
   lora_attn_modules: ['q_proj', 'v_proj']
   apply_lora_to_mlp: False
   apply_lora_to_output: False
-  lora_rank: [8, 8]
-  lora_alpha: [8, 8]
+  lora_rank: [2, 2]
+  lora_alpha: [2, 2]
 
 checkpointer:
   _component_: torchtune.utils.FullModelMetaCheckpointer
@@ -47,7 +47,7 @@ dataset:
   _component_: torchtune.datasets.hellaswag_dataset
 seed: null
 shuffle: True
-batch_size: 1
+batch_size: 4
 
 # Optimizer and Scheduler
 optimizer:
