@@ -412,6 +412,11 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self.adapter_params = get_adapter_params(model)
         set_trainable_params(model, self.adapter_params)
 
+        print(self.adapter_params)
+        for k, v in model.named_parameters():
+            if v.requires_grad:
+                print(k)
+
         model = FSDP(
             module=model,
             auto_wrap_policy=utils.lora_fsdp_wrap_policy(

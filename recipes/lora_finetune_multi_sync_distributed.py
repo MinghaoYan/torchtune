@@ -416,6 +416,11 @@ class LoRAFinetuneMultiSyncRecipeDistributed(FTRecipeInterface):
         self.adapter_params = get_adapter_params(model)
         set_trainable_params(model, self.adapter_params)
 
+        print(self.adapter_params)
+        for k, v in model.named_parameters():
+            if v.requires_grad:
+                print(k)
+
         model = FSDP(
             module=model,
             auto_wrap_policy=utils.lora_fsdp_wrap_policy(
@@ -435,6 +440,7 @@ class LoRAFinetuneMultiSyncRecipeDistributed(FTRecipeInterface):
                 if not self._is_rank_zero
                 else None
             ),
+            use_orig_params=True,
         )
 
         # Ensure no params and buffers are on meta device

@@ -6,6 +6,7 @@
 import math
 from typing import List
 
+import torch
 import torch.nn.functional as F
 
 from torch import nn, Tensor
@@ -197,8 +198,10 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
             "bias", nn.Parameter(bias) if bias is not None else None
         )
         self.dropout = nn.Dropout(p=dropout)
-        self.lora_a = nn.ModuleList([nn.Linear(in_features=in_dim, out_features=lora_rank, bias=False) for lora_rank in self.rank])
-        self.lora_b = nn.ModuleList([nn.Linear(in_features=lora_rank, out_features=out_dim, bias=False) for lora_rank in self.rank])
+        self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False) 
+        self.lora_b = nn.ParameterList([
+            nn.Parameter(torch.zeros(r, out_dim)) for r in self.rank
+        ])
         self.merged = False
         # Note: FSDP's meta device initialization contract assumes that a module's
         # reset_parameters method only initializes its own parameters (i.e. no child
@@ -213,8 +216,8 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
     def initialize_parameters(self):
         # Initialize as in
         # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
-        _concurrent_lora_a_init_params(self.lora_a)
-        _concurrent_lora_b_init_params(self.lora_b)
+        _lora_a_init_params(self.lora_a)
+        # _lora_b_init_params(self.lora_b)
 
     def _create_weight_and_bias(self):
         """
@@ -240,7 +243,8 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
         """
         # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
         # in this module change.
-        adapter_params = ["lora_a.weight", "lora_b.weight"]
+        adapter_params = ["lora_a.weight"]
+        adapter_params.extend([f"lora_b.{idx}" for idx in range(len(self.rank))])
         return adapter_params
 
     def forward(self, x: Tensor) -> Tensor:
@@ -258,25 +262,24 @@ class ConcurrentLoRALinear(nn.Module, AdapterModule):
             out = F.linear(x, self.weight, self.bias)
         if self.disabled:
             return out
+        # lora_out = []
+        # for idx in range(len(self.lora_a)):
+        #     lora_after_a = self.lora_a[idx](self.dropout(x))
+        #     lora_out.append((self.alpha[idx] / self.rank[idx]) * self.lora_b[idx](lora_after_a))
+        # return [out + l for l in lora_out]
+
+        # Apply dropout and linear transformation
+        lora_after_a = self.lora_a(self.dropout(x))
+        
+        # Split the output based on ranks
+        splits = torch.split(lora_after_a, tuple(self.rank), dim=-1)
+
+        # Process each split separately and accumulate the results
         lora_out = []
-        for idx in range(len(self.lora_a)):
-            lora_after_a = self.lora_a[idx](self.dropout(x))
-            lora_out.append((self.alpha[idx] / self.rank[idx]) * self.lora_b[idx](lora_after_a))
+        for idx, split in enumerate(splits):
+            lora_b = split.matmul(self.lora_b[idx])
+            lora_out.append((self.alpha[idx] / self.rank[idx]) * lora_b)
+
+        
+        # Sum the input with the LoRA outputs
         return [out + l for l in lora_out]
-    
-
-def _concurrent_lora_a_init_params(x: nn.Linear) -> None:
-    """
-    Initialize LoRA A weight to Kaiming uniform.
-    """
-    for lora_module in x:
-        nn.init.kaiming_uniform_(lora_module.weight, a=math.sqrt(5))
-
-
-def _concurrent_lora_b_init_params(x: nn.Linear) -> None:
-    """
-    Initialize LoRA B weight to zeros.
-    """
-    for lora_module in x:
-        nn.init.zeros_(lora_module.weight)
-    

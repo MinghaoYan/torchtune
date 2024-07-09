@@ -46,46 +46,45 @@ def get_adapter_params(model: nn.Module) -> Dict[str, nn.Parameter]:
         only adapter parameters.
 
     """
+    # adapter_params = {}
+    # for k, v in model.named_modules():
+    #     if hasattr(v, "adapter_params") and callable(v.adapter_params):
+    #         current_adapter_params = v.adapter_params()
+    #         for n, p in v.named_parameters(recurse=True):
+    #             if n in current_adapter_params:
+    #                 full_key = f"{k}.{n}" if k else n
+    #                 adapter_params.update({full_key: p})
+    #                 current_adapter_params.remove(n)
+    #         assert (
+    #             current_adapter_params == []
+    #         ), f"Adapter params {current_adapter_params} not converted"
+    # return adapter_params
+
     adapter_params = {}
-    for k, v in model.named_modules():
-        if hasattr(v, "adapter_params") and callable(v.adapter_params):
-            current_adapter_params = v.adapter_params()
-            for n, p in v.named_parameters(recurse=True):
-                if n in current_adapter_params:
-                    full_key = f"{k}.{n}" if k else n
-                    adapter_params.update({full_key: p})
-                    current_adapter_params.remove(n)
+    for module_name, module in model.named_modules():
+        if hasattr(module, "adapter_params") and callable(module.adapter_params):
+            current_adapter_params = module.adapter_params()
+            # print(current_adapter_params)
+            # print(module_name)
+            
+            for param_name, param in module.named_parameters(recurse=True):
+                if param_name in current_adapter_params:
+                    if isinstance(module, nn.ParameterList):
+                        for idx, submodule in enumerate(module):
+                            full_param_name = f"{module_name}.{idx}.{param_name}"
+                            adapter_params.update({full_param_name: param})
+                        current_adapter_params.remove(param_name)
+                    else:
+                        full_param_name = f"{module_name}.{param_name}"
+                        adapter_params.update({full_param_name: param})
+                        current_adapter_params.remove(param_name)
+                    
+            # print(full_param_names, current_adapter_params)
             assert (
                 current_adapter_params == []
             ), f"Adapter params {current_adapter_params} not converted"
+    # print(adapter_params)
     return adapter_params
-
-    # adapter_params = {}
-    # for module_name, module in model.named_modules():
-    #     if hasattr(module, "adapter_params") and callable(module.adapter_params):
-    #         current_adapter_params = module.adapter_params()
-    #         # print(current_adapter_params)
-    #         # print(module_name)
-    #         full_param_names = []
-            
-    #         for param_name, param in module.named_parameters(recurse=True):
-    #             if param_name in current_adapter_params:
-    #                 if isinstance(module, nn.ModuleList):
-    #                     for idx, submodule in enumerate(module):
-    #                         full_param_name = f"{module_name}.{idx}.{param_name}"
-    #                         full_param_names.append(full_param_name)
-    #                 else:
-    #                     full_param_name = f"{module_name}.{param_name}"
-    #                     full_param_names.append(full_param_name)
-
-    #             if param_name in full_param_names:
-    #                 adapter_params.update({param_name: param})
-    #                 full_param_names.remove(param_name)
-            
-    #         assert (
-    #             full_param_names == []
-    #         ), f"Adapter params {full_param_names} not converted"
-    # return adapter_params
 
 
 def set_trainable_params(model: nn.Module, adapter_params: Dict[str, Any]) -> None:
