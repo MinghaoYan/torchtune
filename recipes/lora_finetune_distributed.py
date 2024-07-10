@@ -139,6 +139,8 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
+        self.num_adapters = len(cfg.model.lora_rank)
+
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
         Extract the checkpoint state from file and validate. This includes the
@@ -670,6 +672,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                 logits = logits[..., :-1, :].contiguous()
                 labels = labels[..., 1:].contiguous()
                 logits = logits.transpose(1, 2)
+
+                # print(f"label shape {labels.shape}, logits shape {logits.shape}")
+                labels = labels.repeat(self.num_adapters, 1)
                 # Compute loss
                 loss = self._loss_fn(logits, labels)
                 # free logits otherwise it peaks backward memory

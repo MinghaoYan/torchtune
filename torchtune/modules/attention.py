@@ -166,7 +166,7 @@ class CausalSelfAttention(nn.Module):
             - Make application of positional embeddings optional
         """
         # input has shape [b, s, d]
-        print(f"attention input shape is {x.shape}")
+        # print(f"attention input shape is {x.shape}")
         _, seq_len, _ = x.shape
         bsz = self.bsz
 
@@ -195,7 +195,7 @@ class CausalSelfAttention(nn.Module):
             max_len = max(max_len, v.shape[0])
         assert(max_len > 0)
 
-        print(q.shape, k.shape, v.shape)
+        # print(q.shape, k.shape, v.shape)
         if q.dim() == 3:
             if q.shape[0] == bsz:
                 q = q.unsqueeze(dim=0)
@@ -216,8 +216,8 @@ class CausalSelfAttention(nn.Module):
                 v = v.reshape(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
         
         # Find the lengths of lora adapters and expand accordingly
-        print(max_len, bsz)
-        print(f"new bsz is ", bsz)
+        # print(max_len, bsz)
+        # print(f"new bsz is ", bsz)
             
         
         new_bsz = bsz * max_len

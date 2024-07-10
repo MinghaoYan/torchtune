@@ -142,13 +142,13 @@ class LoRALinear(nn.Module, AdapterModule):
         # Handle first layer
         # total_dim = len(self.rank) * 
         # if x.shape[0] == 1:
-        print(f"Lora input dim is {x.shape}")
+        # print(f"Lora input dim is {x.shape}")
         lora_out = []
         num_adapters = len(self.rank)
-        print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
+        # print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
         if x.shape[0] == self.bsz and num_adapters > 1:
             x = x.repeat(num_adapters, 1, 1)
-        print(f"Lora input dim after repeat is {x.shape}")
+        # print(f"Lora input dim after repeat is {x.shape}")
         after_dropout = self.dropout(x)
         bsz = x.shape[0] // num_adapters
         for idx in range(num_adapters):
@@ -171,11 +171,10 @@ class LoRALinear(nn.Module, AdapterModule):
         
         # return lora_out
         # lora_out = (self.alpha / self.rank) * self.lora_b(lora_out)
-        for out in lora_out:
-            print(out.shape)
+        # for out in lora_out:
+        #     print(out.shape)
         total_out = torch.stack(lora_out, dim=0)
-        print(total_out.shape)
-
+        # print(total_out.shape)
         
         return total_out
 
