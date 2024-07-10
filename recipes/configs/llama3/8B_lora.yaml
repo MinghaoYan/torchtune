@@ -30,6 +30,7 @@ model:
   apply_lora_to_output: False
   lora_rank: [8, 8]
   lora_alpha: [16, 16]
+  bsz: 4
 
 checkpointer:
   _component_: torchtune.utils.FullModelMetaCheckpointer
@@ -64,7 +65,7 @@ loss:
 # Training
 epochs: 1
 max_steps_per_epoch: null
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
 
 # Logging
 output_dir: /tmp/lora_finetune_output

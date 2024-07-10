@@ -152,6 +152,7 @@ def lora_llama3(
     lora_dropout: float = 0.0,
     # Quantization args
     quantize_base: bool = False,
+    bsz: int=1,
 ) -> TransformerDecoder:
     """
     Return a version of Llama3 (an instance of :func:`~torchtune.modules.TransformerDecoder`)
@@ -205,6 +206,7 @@ def lora_llama3(
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
         quantize_base=quantize_base,
+        bsz=bsz,
     )
 
     hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
@@ -271,6 +273,7 @@ def lora_llama3_self_attention(
     lora_alpha: float,
     lora_dropout: float = 0.0,
     quantize_base: bool = False,
+    bsz: int,
 ) -> CausalSelfAttention:
     """
     Return an instance of :func:`~torchtune.modules.CausalSelfAttention` with LoRA
@@ -318,6 +321,7 @@ def lora_llama3_self_attention(
             alpha=lora_alpha,
             dropout=lora_dropout,
             quantize_base=quantize_base,
+            bsz=bsz,
         )
         if "q_proj" in lora_modules
         else nn.Linear(embed_dim, num_heads * head_dim, bias=False)
@@ -330,6 +334,7 @@ def lora_llama3_self_attention(
             alpha=lora_alpha,
             dropout=lora_dropout,
             quantize_base=quantize_base,
+            bsz=bsz,
         )
         if "k_proj" in lora_modules
         else nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False)
@@ -342,6 +347,7 @@ def lora_llama3_self_attention(
             alpha=lora_alpha,
             dropout=lora_dropout,
             quantize_base=quantize_base,
+            bsz=bsz,
         )
         if "v_proj" in lora_modules
         else nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False)
@@ -354,6 +360,7 @@ def lora_llama3_self_attention(
             alpha=lora_alpha,
             dropout=lora_dropout,
             quantize_base=quantize_base,
+            bsz=bsz,
         )
         if "output_proj" in lora_modules
         else nn.Linear(embed_dim, embed_dim, bias=False)
@@ -371,6 +378,7 @@ def lora_llama3_self_attention(
         pos_embeddings=rope,
         max_seq_len=max_seq_len,
         attn_dropout=attn_dropout,
+        bsz=bsz,
     )
     return self_attn
 

@@ -71,6 +71,7 @@ class TransformerDecoderLayer(nn.Module):
         attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
 
         # Expand x for multiple LoRA adapters
+        print(attn_out.shape, x.shape)
         if attn_out.shape[0] > x.shape[0]:
             repeat_factor = attn_out.shape[0] // x.shape[0]
             x = x.repeat(repeat_factor, 1, 1)

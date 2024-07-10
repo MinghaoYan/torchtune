@@ -240,7 +240,8 @@ def prepare_model_for_fsdp_with_meta_device(model: nn.Module) -> nn.Module:
         # directly on any LoRALinear submodules lora_a and lora_b.
         if isinstance(v, LoRALinear):
             v.lora_a.reset_parameters = _lora_a_init_params.__get__(v.lora_a)
-            v.lora_b.reset_parameters = _lora_b_init_params.__get__(v.lora_b)
+            for i in range(len(v.rank)):
+                getattr(v, f"lora_b_{i}").reset_parameters = _lora_b_init_params.__get__(getattr(v, f"lora_b_{i}"))
 
     return model
 

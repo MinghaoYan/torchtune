@@ -48,6 +48,7 @@ class LoRALinear(nn.Module, AdapterModule):
         dropout: float = 0.0,
         use_bias: bool = False,
         quantize_base: bool = False,
+        bsz: int = 1,
     ):
         super().__init__()
         self.in_dim = in_dim
@@ -56,6 +57,7 @@ class LoRALinear(nn.Module, AdapterModule):
         self.out_dim = out_dim
         self.use_bias = use_bias
         self._quantize_base = quantize_base
+        self.bsz = bsz
         weight, bias = self._create_weight_and_bias()
         # 'self.disabled' is a flag showing whether to turn off LoRA adapters,
         # this can be used in DPO for treating the lora adapters as the policy model
@@ -66,9 +68,10 @@ class LoRALinear(nn.Module, AdapterModule):
             "bias", nn.Parameter(bias) if bias is not None else None
         )
         self.dropout = nn.Dropout(p=dropout)
-        self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
+        # self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
         # self.lora_b = nn.Linear(in_features=rank, out_features=out_dim, bias=False)
         for idx in range(len(self.rank)):
+            setattr(self, f'lora_a_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
             setattr(self, f'lora_b_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
 
         self.merged = False
@@ -85,8 +88,9 @@ class LoRALinear(nn.Module, AdapterModule):
     def initialize_parameters(self):
         # Initialize as in
         # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
-        _lora_a_init_params(self.lora_a)
+        # _lora_a_init_params(self.lora_a)
         for idx in range(len(self.rank)):
+            _lora_a_init_params(getattr(self, f"lora_a_{idx}"))
             _lora_b_init_params(getattr(self, f"lora_b_{idx}"))
 
     def _create_weight_and_bias(self):
@@ -113,8 +117,9 @@ class LoRALinear(nn.Module, AdapterModule):
         """
         # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
         # in this module change.
-        adapter_params = ["lora_a.weight"]
+        adapter_params = []
         for idx in range(len(self.rank)):
+            adapter_params.append(f"lora_a_{idx}.weight")
             adapter_params.append(f"lora_b_{idx}.weight")
         return adapter_params
 
@@ -134,19 +139,45 @@ class LoRALinear(nn.Module, AdapterModule):
         if self.disabled:
             return out
 
-        lora_after_a = self.lora_a(self.dropout(x))
-
-        # Split the output based on ranks
-        splits = torch.split(lora_after_a, tuple(self.rank), dim=-1)
-
-        # Process each split separately and accumulate the results
+        # Handle first layer
+        # total_dim = len(self.rank) * 
+        # if x.shape[0] == 1:
+        print(f"Lora input dim is {x.shape}")
         lora_out = []
-        for idx, split in enumerate(splits):
-            lora_b = split.matmul(getattr(obj, f'lora_b_{idx}'))
-            lora_out.append((self.alpha[idx] / self.rank[idx]) * lora_b + out)
+        num_adapters = len(self.rank)
+        print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
+        if x.shape[0] == self.bsz and num_adapters > 1:
+            x = x.repeat(num_adapters, 1, 1)
+        print(f"Lora input dim after repeat is {x.shape}")
+        after_dropout = self.dropout(x)
+        bsz = x.shape[0] // num_adapters
+        for idx in range(num_adapters):
+            lora_a_slice = after_dropout[idx * bsz: (idx + 1) * bsz, :, :]
+            # print(f"lora_a_slice dim is {lora_a_slice.shape}")
+            lora_after_a = getattr(self, f'lora_a_{idx}')(lora_a_slice)
+            # print(f"Lora after a dim is {lora_after_a.shape}")
+            # print(f"out dim is {out.shape}")
+            lora_after_b = getattr(self, f'lora_b_{idx}')(lora_after_a)
+            # print(f"Lora after b dim is {lora_after_b.shape}")
+            scaled_results = (self.alpha[idx] / self.rank[idx]) * lora_after_b
+            # print(f"scaled_results dim is {scaled_results.shape}")
+            if out.shape[0] > self.bsz:
+                final_results = scaled_results + out[idx * bsz: (idx + 1) * bsz, :, :]
+            else:
+                final_results = scaled_results + out
+            # print(f"final_results dim is {final_results.shape}")
+            lora_out.append(final_results)
+
         
+        # return lora_out
         # lora_out = (self.alpha / self.rank) * self.lora_b(lora_out)
-        return torch.stack(lora_out, dim=0)
+        for out in lora_out:
+            print(out.shape)
+        total_out = torch.stack(lora_out, dim=0)
+        print(total_out.shape)
+
+        
+        return total_out
 
 
 def _lora_a_init_params(x: nn.Linear) -> None:
