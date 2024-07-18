@@ -124,66 +124,166 @@ class CausalSelfAttention(nn.Module):
 
         self.bsz = bsz
 
-    def forward(
-        self,
-        x: Tensor,
-        *,
-        mask: Optional[Tensor] = None,
-        input_pos: Optional[Tensor] = None,
-    ) -> Tensor:
-        """
-        Args:
-            x (Tensor): input tensor with shape
-                [batch_size x seq_length x embed_dim]
-            mask (Optional[Tensor]): Optional boolean tensor which contains the attention mask
-                with shape [batch_size x seq_length x seq_length]. This is applied after
-                the query-key multiplication and before the softmax. A value of True in row i
-                and column j means token i attends to token j. A value of False means token i
-                does not attend to token j. If no mask is specified, a causal mask
-                is used by default. Default is None.
-            input_pos (Optional[Tensor]): Optional tensor which contains the position ids
-                of each token. During training, this is used to indicate the positions
-                of each token relative to its sample when packed, shape [b x s].
-                During inference, this indicates the position of the current token.
-                If none, assume the index of the token is its position id. Default is None.
+    # def forward(
+    #     self,
+    #     x: Tensor,
+    #     *,
+    #     mask: Optional[Tensor] = None,
+    #     input_pos: Optional[Tensor] = None,
+    # ) -> Tensor:
+    #     """
+    #     Args:
+    #         x (Tensor): input tensor with shape
+    #             [batch_size x seq_length x embed_dim]
+    #         mask (Optional[Tensor]): Optional boolean tensor which contains the attention mask
+    #             with shape [batch_size x seq_length x seq_length]. This is applied after
+    #             the query-key multiplication and before the softmax. A value of True in row i
+    #             and column j means token i attends to token j. A value of False means token i
+    #             does not attend to token j. If no mask is specified, a causal mask
+    #             is used by default. Default is None.
+    #         input_pos (Optional[Tensor]): Optional tensor which contains the position ids
+    #             of each token. During training, this is used to indicate the positions
+    #             of each token relative to its sample when packed, shape [b x s].
+    #             During inference, this indicates the position of the current token.
+    #             If none, assume the index of the token is its position id. Default is None.
 
-        Returns:
-            Tensor: output tensor with attention applied
+    #     Returns:
+    #         Tensor: output tensor with attention applied
 
-        Raises:
-            ValueError: if seq_len of x is bigger than max_seq_len
+    #     Raises:
+    #         ValueError: if seq_len of x is bigger than max_seq_len
 
-        Notation used for tensor shapes:
-            - b: batch size
-            - s: sequence length
-            - n_h: num heads
-            - n_kv: num kv heads
-            - d: embed dim
-            - h_d: head dim
+    #     Notation used for tensor shapes:
+    #         - b: batch size
+    #         - s: sequence length
+    #         - n_h: num heads
+    #         - n_kv: num kv heads
+    #         - d: embed dim
+    #         - h_d: head dim
 
-        TODO:
-            - Return the attention weights
-            - Make application of positional embeddings optional
-        """
-        # input has shape [b, s, d]
-        # print(f"attention input shape is {x.shape}")
-        _, seq_len, _ = x.shape
-        bsz = self.bsz
+    #     TODO:
+    #         - Return the attention weights
+    #         - Make application of positional embeddings optional
+    #     """
+    #     # input has shape [b, s, d]
+    #     # print(f"attention input shape is {x.shape}")
+    #     _, seq_len, _ = x.shape
+    #     bsz = self.bsz
 
-        if seq_len > self.max_seq_len:
-            raise ValueError(
-                f"seq_len ({seq_len}) of input tensor should be smaller "
-                f"than max_seq_len ({self.max_seq_len})"
-            )
+    #     if seq_len > self.max_seq_len:
+    #         raise ValueError(
+    #             f"seq_len ({seq_len}) of input tensor should be smaller "
+    #             f"than max_seq_len ({self.max_seq_len})"
+    #         )
 
-        # q has shape [b, s, num_heads * head_dim]
-        # k has shape [b, s, num_kv_heads * head_dim]
-        # v has shape [b, s, num_kv_heads * head_dim]
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+    #     # q has shape [b, s, num_heads * head_dim]
+    #     # k has shape [b, s, num_kv_heads * head_dim]
+    #     # v has shape [b, s, num_kv_heads * head_dim]
+    #     q = self.q_proj(x)
+    #     k = self.k_proj(x)
+    #     v = self.v_proj(x)
 
-        # number of queries per key/value
+    #     # number of queries per key/value
+    #     q_per_kv = self.num_heads // self.num_kv_heads
+
+    #     max_len = -1
+    #     if q.dim() == 4:
+    #         max_len = max(max_len, q.shape[0])
+    #     if k.dim() == 4:
+    #         max_len = max(max_len, k.shape[0])
+    #     if v.dim() == 4:
+    #         max_len = max(max_len, v.shape[0])
+    #     assert(max_len > 0)
+
+    #     # print(q.shape, k.shape, v.shape)
+    #     if q.dim() == 3:
+    #         if q.shape[0] == bsz:
+    #             q = q.unsqueeze(dim=0)
+    #             q = q.expand(max_len, bsz, seq_len, self.num_heads * self.head_dim)
+    #         if q.shape[0] > bsz:
+    #             q = q.reshape(max_len, bsz, seq_len, self.num_heads * self.head_dim)
+    #     if k.dim() == 3:
+    #         if k.shape[0] == bsz:
+    #             k = k.unsqueeze(dim=0)
+    #             k = k.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
+    #         if k.shape[0] > bsz:
+    #             k = k.reshape(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
+    #     if v.dim() == 3:
+    #         if v.shape[0] == bsz:
+    #             v = v.unsqueeze(dim=0)
+    #             v = v.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
+    #         if v.shape[0] > bsz:
+    #             v = v.reshape(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
+        
+    #     # Find the lengths of lora adapters and expand accordingly
+    #     # print(max_len, bsz)
+    #     # print(f"new bsz is ", bsz)
+            
+        
+    #     new_bsz = bsz * max_len
+
+    #     # q: [b, s, n_kv, q_per_kv, h_d]
+    #     # k: [b, s, n_kv, 1, h_d]
+    #     # v: [b, s, n_kv, 1, h_d]
+    #     q = q.reshape(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+    #     k = k.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+    #     v = v.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+
+    #     # if needed, expand the key and value tensors to have the same shape
+    #     # as the query tensor by copying values across the relevant dim
+    #     if self.num_heads != self.num_kv_heads:
+    #         k = k.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+    #         v = v.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+
+    #     # llama2 applies the RoPE embeddings on tensors with shape
+    #     # [b, s, n_h, h_d]
+    #     # Reshape the tensors before we apply RoPE
+    #     q = q.reshape(new_bsz, seq_len, -1, self.head_dim)
+    #     k = k.reshape(new_bsz, seq_len, -1, self.head_dim)
+    #     v = v.reshape(new_bsz, seq_len, -1, self.head_dim)
+
+    #     # Apply positional embeddings
+    #     q = self.pos_embeddings(q, input_pos=input_pos)
+    #     k = self.pos_embeddings(k, input_pos=input_pos)
+
+    #     # [b, n_h, s, h_d]
+    #     q = q.transpose(1, 2)
+    #     k = k.transpose(1, 2)
+    #     v = v.transpose(1, 2)
+
+    #     # Update key-value cache
+    #     if self.kv_cache is not None:
+    #         k, v = self.kv_cache.update(input_pos, k, v)
+
+    #     # shape: [b, 1, s, s]
+    #     if mask is not None:
+    #         mask = mask[:, None, :, :]
+
+    #     # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
+    #     # manual implementation of attention
+    #     output = nn.functional.scaled_dot_product_attention(
+    #         q,
+    #         k,
+    #         v,
+    #         attn_mask=mask,
+    #         dropout_p=self.attn_dropout,
+    #         is_causal=self.kv_cache is None and mask is None,
+    #     )
+
+    #     # reshape the output to be the same shape as the input
+    #     output = output.transpose(1, 2).contiguous().view(new_bsz, seq_len, -1)
+    #     return self.output_proj(output)
+
+    def _project_q(self, x):
+        return self.q_proj(x)
+
+    def _project_k(self, x):
+        return self.k_proj(x)
+
+    def _project_v(self, x):
+        return self.v_proj(x)
+
+    def _reshape_heads(self, q, k, v, bsz, seq_len):
         q_per_kv = self.num_heads // self.num_kv_heads
 
         max_len = -1
@@ -193,9 +293,8 @@ class CausalSelfAttention(nn.Module):
             max_len = max(max_len, k.shape[0])
         if v.dim() == 4:
             max_len = max(max_len, v.shape[0])
-        assert(max_len > 0)
+        assert max_len > 0
 
-        # print(q.shape, k.shape, v.shape)
         if q.dim() == 3:
             if q.shape[0] == bsz:
                 q = q.unsqueeze(dim=0)
@@ -214,54 +313,40 @@ class CausalSelfAttention(nn.Module):
                 v = v.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
             if v.shape[0] > bsz:
                 v = v.reshape(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
-        
-        # Find the lengths of lora adapters and expand accordingly
-        # print(max_len, bsz)
-        # print(f"new bsz is ", bsz)
-            
-        
+
         new_bsz = bsz * max_len
 
-        # q: [b, s, n_kv, q_per_kv, h_d]
-        # k: [b, s, n_kv, 1, h_d]
-        # v: [b, s, n_kv, 1, h_d]
-        q = q.reshape(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-        k = k.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
-        v = v.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+        q = q.reshape(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+        k = k.reshape(bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+        v = v.reshape(bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
 
-        # if needed, expand the key and value tensors to have the same shape
-        # as the query tensor by copying values across the relevant dim
         if self.num_heads != self.num_kv_heads:
-            k = k.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-            v = v.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            k = k.expand(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            v = v.expand(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
 
-        # llama2 applies the RoPE embeddings on tensors with shape
-        # [b, s, n_h, h_d]
-        # Reshape the tensors before we apply RoPE
-        q = q.reshape(new_bsz, seq_len, -1, self.head_dim)
-        k = k.reshape(new_bsz, seq_len, -1, self.head_dim)
-        v = v.reshape(new_bsz, seq_len, -1, self.head_dim)
+        q = q.reshape(bsz, seq_len, -1, self.head_dim)
+        k = k.reshape(bsz, seq_len, -1, self.head_dim)
+        v = v.reshape(bsz, seq_len, -1, self.head_dim)
 
-        # Apply positional embeddings
+        return q, k, v
+
+    def _apply_pos_emb(self, q, k, input_pos):
         q = self.pos_embeddings(q, input_pos=input_pos)
         k = self.pos_embeddings(k, input_pos=input_pos)
+        return q, k
 
-        # [b, n_h, s, h_d]
+    def _scaled_dot_product_attn(self, q, k, v, mask):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # Update key-value cache
         if self.kv_cache is not None:
             k, v = self.kv_cache.update(input_pos, k, v)
 
-        # shape: [b, 1, s, s]
         if mask is not None:
             mask = mask[:, None, :, :]
 
-        # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
-        # manual implementation of attention
-        output = nn.functional.scaled_dot_product_attention(
+        return nn.functional.scaled_dot_product_attention(
             q,
             k,
             v,
@@ -270,6 +355,30 @@ class CausalSelfAttention(nn.Module):
             is_causal=self.kv_cache is None and mask is None,
         )
 
-        # reshape the output to be the same shape as the input
-        output = output.transpose(1, 2).contiguous().view(new_bsz, seq_len, -1)
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        mask: Optional[Tensor] = None,
+        input_pos: Optional[Tensor] = None,
+    ) -> Tensor:
+        _, seq_len, _ = x.shape
+        bsz = self.bsz
+
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"seq_len ({seq_len}) of input tensor should be smaller "
+                f"than max_seq_len ({self.max_seq_len})"
+            )
+
+        q = checkpoint(self._project_q, x)
+        k = checkpoint(self._project_k, x)
+        v = checkpoint(self._project_v, x)
+
+        q, k, v = checkpoint(self._reshape_heads, q, k, v, bsz, seq_len)
+        q, k = checkpoint(self._apply_pos_emb, q, k, input_pos)
+
+        output = checkpoint(self._scaled_dot_product_attn, q, k, v, mask)
+        
+        output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
         return self.output_proj(output)

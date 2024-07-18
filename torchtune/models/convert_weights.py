@@ -25,6 +25,12 @@ _FROM_META = {
     "layers.{}.feed_forward.w1.weight": "layers.{}.mlp.w1.weight",
     "layers.{}.feed_forward.w2.weight": "layers.{}.mlp.w2.weight",
     "layers.{}.feed_forward.w3.weight": "layers.{}.mlp.w3.weight",
+    "layers.{}.attention.wk.lora_a_{}.weight": "layers.{}.attn.k_proj.lora_a_{}.weight",
+    "layers.{}.attention.wk.lora_b_{}.weight": "layers.{}.attn.k_proj.lora_b_{}.weight",
+    "layers.{}.attention.wq.lora_a_{}.weight": "layers.{}.attn.q_proj.lora_a_{}.weight",
+    "layers.{}.attention.wq.lora_b_{}.weight": "layers.{}.attn.q_proj.lora_b_{}.weight",
+    "layers.{}.attention.wv.lora_a_{}.weight": "layers.{}.attn.v_proj.lora_a_{}.weight",
+    "layers.{}.attention.wv.lora_b_{}.weight": "layers.{}.attn.v_proj.lora_b_{}.weight",
 }
 
 # state dict key mappings from HF's format to torchtune's format
@@ -49,10 +55,23 @@ def get_mapped_key(key: str, mapping_dict: Dict[str, str]) -> str:
     try:
         if "layers" in key:
             # Replace layer number with "{}" to create key for lookup
-            abstract_key = re.sub(r"(\.\d+)", ".{}", key)
-            layer_num = re.search(r"\d+", key).group(0)
+            abstract_key = re.sub(r"(\.|_)\d+", r"\1{}", key)
+            layer_numbers = re.findall(r"(?<=\.|_)\d+", key)
+            layer_numbers = tuple(int(num) for num in layer_numbers)
             new_key = mapping_dict[abstract_key]
-            new_key = new_key.format(layer_num)
+            new_key = new_key.format(*layer_numbers)
+            # # Replace all occurrences of numbers following . or _ with "{}"
+            # abstract_key = re.sub(r"(\.|_)\d+", r"\1{}", key)
+
+            # # Extract all numbers that follow . or _
+            # layer_numbers = re.findall(r"(?<=\.|_)\d+", key)
+
+            # # Convert the list of layer numbers to a tuple of integers
+            # layer_numbers = tuple(int(num) for num in layer_numbers)
+
+            # # Format the abstract key with all extracted layer numbers
+            # new_key = abstract_key.format(*layer_numbers)
+            # print(new_key)
         else:
             new_key = mapping_dict[key]
     except KeyError as e:
@@ -106,6 +125,33 @@ def tune_to_meta(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
     for key, value in state_dict.items():
         new_key = get_mapped_key(key, inverted_mapping_dict)
         converted_state_dict[new_key] = value
+
+    return converted_state_dict
+
+
+def tune_to_meta_with_adapterss(model_state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """
+    Convert a state dict from torchtune's format to Meta's format. This function
+    doesn't handle any sharding or splitting of state dicts. It follows the
+    state_dict IN -> state_dict OUT pattern.
+
+    Args:
+        state_dict (Dict[str, torch.Tensor]): State dict in torchtune's format.
+
+    Returns:
+        Dict[str, torch.Tensor]: State dict in Meta's format.
+    """
+    converted_state_dict = {}
+    inverted_mapping_dict = {v: k for k, v in _FROM_META.items()}
+    # print(f"inverted mapping dict is {inverted_mapping_dict}")
+    for key, value in model_state_dict.items():
+        # print(key)
+        new_key = get_mapped_key(key, inverted_mapping_dict)
+        converted_state_dict[new_key] = value
+    
+    # for key, value in adapter_state_dict.items():
+    #     new_key = get_mapped_key(key, inverted_mapping_dict)
+    #     converted_state_dict[new_key] = value
 
     return converted_state_dict
 

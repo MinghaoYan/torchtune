@@ -255,13 +255,13 @@ def get_merged_lora_ckpt(
     Returns:
         Dict[str, Any]: The merged state dict.
     """
-    lora_modules = _get_lora_modules(state_dict)
-    for module in lora_modules:
-        lora_a_weight = state_dict[f"{module}.lora_a.weight"]
-        lora_b_weight = state_dict[f"{module}.lora_b.weight"]
-        state_dict[f"{module}.weight"] += (alpha / rank) * lora_b_weight @ lora_a_weight
-        del state_dict[f"{module}.lora_a.weight"]
-        del state_dict[f"{module}.lora_b.weight"]
+    # lora_modules = _get_lora_modules(state_dict)
+    # for module in lora_modules:
+    #     lora_a_weight = state_dict[f"{module}.lora_a.weight"]
+    #     lora_b_weight = state_dict[f"{module}.lora_b.weight"]
+    #     state_dict[f"{module}.weight"] += (alpha / rank) * lora_b_weight @ lora_a_weight
+    #     del state_dict[f"{module}.lora_a.weight"]
+    #     del state_dict[f"{module}.lora_b.weight"]
     return state_dict
 
 

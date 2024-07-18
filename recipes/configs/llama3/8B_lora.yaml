@@ -28,8 +28,8 @@ model:
   lora_attn_modules: ['q_proj', 'v_proj']
   apply_lora_to_mlp: False
   apply_lora_to_output: False
-  lora_rank: [8, 8]
-  lora_alpha: [16, 16]
+  lora_rank: [8, 8, 8, 8]
+  lora_alpha: [16, 16, 16, 16]
   bsz: 4
 
 checkpointer:
@@ -64,8 +64,8 @@ loss:
 
 # Training
 epochs: 1
-max_steps_per_epoch: null
-gradient_accumulation_steps: 4
+max_steps_per_epoch: 2
+gradient_accumulation_steps: 1
 
 # Logging
 output_dir: /tmp/lora_finetune_output

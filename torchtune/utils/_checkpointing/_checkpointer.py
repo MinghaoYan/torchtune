@@ -700,29 +700,35 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         """
         self._output_dir.mkdir(exist_ok=True)
         model_state_dict = state_dict[utils.MODEL_KEY]
-        state_dict[utils.MODEL_KEY] = convert_weights.tune_to_meta(model_state_dict)
+        # state_dict[utils.MODEL_KEY] = convert_weights.tune_to_meta(model_state_dict)
+
+        adapter_state_dict = state_dict[utils.ADAPTER_KEY]
+
+        # print(f"Adapter state dict is {adapter_state_dict}")
+        state_dict = convert_weights.tune_to_meta_with_adapterss(adapter_state_dict)
 
         # Output file is always a .pt file with the epoch number in the name
         checkpoint_file = Path.joinpath(
-            self._output_dir, f"meta_model_{epoch}"
+            self._output_dir, f"meta_model_{epoch}_test_with_adapters"
         ).with_suffix(".pt")
-        torch.save(state_dict[utils.MODEL_KEY], checkpoint_file)
+        # torch.save(state_dict[utils.MODEL_KEY], checkpoint_file)
+        torch.save(state_dict, checkpoint_file)
         logger.info(
             "Model checkpoint of size "
             f"{os.path.getsize(checkpoint_file) / 1000**3:.2f} GB "
             f"saved to {checkpoint_file}"
         )
 
-        if utils.ADAPTER_KEY in state_dict:
-            output_path = Path.joinpath(
-                self._output_dir, f"adapter_{epoch}"
-            ).with_suffix(".pt")
-            torch.save(state_dict[utils.ADAPTER_KEY], output_path)
-            logger.info(
-                "Adapter checkpoint of size "
-                f"{os.path.getsize(output_path) / 1000**3:.2f} GB "
-                f"saved to {output_path}"
-            )
+        # if utils.ADAPTER_KEY in state_dict:
+        #     output_path = Path.joinpath(
+        #         self._output_dir, f"adapter_{epoch}"
+        #     ).with_suffix(".pt")
+        #     torch.save(state_dict[utils.ADAPTER_KEY], output_path)
+        #     logger.info(
+        #         "Adapter checkpoint of size "
+        #         f"{os.path.getsize(output_path) / 1000**3:.2f} GB "
+        #         f"saved to {output_path}"
+        #     )
 
         # If the recipe state needs to be output, first remove the model state dict
         # and if it exists, remove the adapter state dict as well
