@@ -39,7 +39,24 @@ from torchtune.utils import DummyProfiler, PROFILER_KEY
 
 from tqdm import tqdm
 
+from collections import deque
+
+import asyncio
+
 log = utils.get_logger("DEBUG")
+
+
+# Sample class to represent objects in the queue with source information
+class QueueObject:
+    def __init__(self, batch_idx, layer_idx, source, layer_input):
+        self.batch_idx = batch_idx
+        self.layer_idx = layer_idx
+        self.source = source
+        self.input = layer_input
+
+    def __repr__(self):
+        return f"QueueObject(batch_number={self.batch_number}, layer_num={self.layer_num}, source='{self.source}')"
+
 
 
 class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
@@ -140,6 +157,13 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
         self.num_adapters = len(cfg.model.lora_rank)
+
+        # These are the queues for forward / backward / softmax passes that are yet to be executed
+        self.fwd_queue = deque()
+        self.bwd_queue = deque()
+        self.softmax_queue = deque()
+
+        self.num_layers = num_layers
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
@@ -667,6 +691,9 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     input_pos.to(self._device) if input_pos is not None else None
                 )
 
+                # Schedule next step execution
+                schedule_next_step()
+
                 logits = self._model(tokens, mask=mask, input_pos=input_pos)
                 # Shift so that tokens < n predict n
                 logits = logits[..., :-1, :].contiguous()
@@ -731,6 +758,179 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self.save_checkpoint(epoch=curr_epoch)
 
         self._profiler.stop()
+
+    
+    def train_by_step(self) -> None:
+        """
+        The core training loop.
+        """
+        # clean up before training begins
+        utils.cleanup_before_training()
+
+        _, rank = utils.get_world_size_and_rank()
+
+        # zero out the gradients before starting training
+        self._optimizer.zero_grad()
+
+        # Initialize tokens count and running loss (for grad accumulation)
+
+        running_loss = 0
+        num_tokens = 0
+
+        # self.epochs_run should be non-zero when we're resuming from a checkpoint
+        for curr_epoch in range(self.epochs_run, self.total_epochs):
+
+            # Update the sampler to ensure data is correctly shuffled across epochs
+            # in case shuffle is True
+            self._sampler.set_epoch(curr_epoch)
+
+            # pbar = tqdm(total=self._steps_per_epoch, disable=not (rank == 0))
+            for idx, batch in enumerate(self._dataloader):
+                if (
+                    self.max_steps_per_epoch is not None
+                    and (idx // self._gradient_accumulation_steps)
+                    == self.max_steps_per_epoch
+                ):
+                    break
+
+
+            self.epochs_run += 1
+            # self.save_checkpoint(epoch=curr_epoch)
+
+
+    async def peek_queue(q):
+        with q.mutex:
+            if not q.queue:
+                return None
+            return q.queue[0]
+
+    async def retrieve_data(batch_idx):
+        # Calculate the start and end indices for the batch
+        start_index = batch_index * self._dataloader.batch_size
+        end_index = start_index + self._dataloader.batch_size
+
+        # Access the specific batch
+        batch = self._dataloader.dataset[start_index:end_index]
+
+        # Process the batch as usual
+        tokens, labels = batch["tokens"], batch["labels"]
+        mask = batch.get("mask", None)
+        input_pos = batch.get("input_pos", None)
+
+        tokens = tokens.to(self._device)
+        num_tokens += tokens.numel()
+        labels = labels.to(self._device)
+        mask = mask.to(self._device) if mask is not None else None
+        input_pos = input_pos.to(self._device) if input_pos is not None else None
+
+        return tokens, mask, input_pos
+
+
+    async def dispatch_layer(item):
+        if item.source == "fwd":
+            new_input = self.layers[item.layer_idx](layer_input)
+
+            if layer_idx == self.num_layers - 1:
+                # TODO: handle the output projection here
+
+                self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", new_input))
+            else:
+                self.fwd_queue.put(QueueObject(item.batch_idx, item.layer_idx+1, "fwd", new_input))
+        elif item.source == "bwd":
+            if layer_idx == self.num_layers - 1:
+                #TODO: handle 
+            
+            loss = criterion(activation, target)
+            loss.backward(retain_graph=True)
+
+
+            if layer_idx == 0:
+                # TODO: handle the output projection backprop here
+
+                # Get new input
+                self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
+            else:
+                self.bwd_queue.put(QueueObject(item.batch_idx, item.layer_idx-1, "bwd", new_input))
+        elif item.source == "softmax":
+
+            logits = self.layer_input[..., :-1, :].contiguous()
+            labels = labels[..., 1:].contiguous()
+            logits = logits.transpose(1, 2)
+
+            # print(f"label shape {labels.shape}, logits shape {logits.shape}")
+            labels = labels.repeat(self.num_adapters, 1)
+            # Compute loss
+            loss = self._loss_fn(logits, labels)
+            # free logits otherwise it peaks backward memory
+            del logits
+
+            loss = loss / self._gradient_accumulation_steps
+            
+            self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss))
+
+    async def dispatch_iteration(item):
+        if item.source == "fwd":
+            tokens, mask, input_pos = retrieve_data(item.batch_idx)
+            logits = self._model(tokens, mask=mask, input_pos=input_pos)
+            self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", new_input))
+        
+        elif item.source == "bwd":
+            running_loss += loss
+
+            item.input.backward()
+
+            # Step with optimizer
+            if (item.batch_idx + 1) % self._gradient_accumulation_steps == 0:
+                self._optimizer.step()
+                self._optimizer.zero_grad(set_to_none=True)
+                self._lr_scheduler.step()
+
+                # Update the number of steps when the weights are updated
+                self.global_step += 1
+
+                # Reset running stats for the next step
+                running_loss = 0
+                num_tokens = 0
+
+            # Get new input
+            self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
+
+        elif item.source == "softmax":
+
+            logits = item.input[..., :-1, :].contiguous()
+            labels = labels[..., 1:].contiguous()
+            logits = logits.transpose(1, 2)
+
+            # print(f"label shape {labels.shape}, logits shape {logits.shape}")
+            labels = labels.repeat(self.num_adapters, 1)
+            # Compute loss
+            loss = self._loss_fn(logits, labels)
+            # free logits otherwise it peaks backward memory
+            del logits
+
+            loss = loss / self._gradient_accumulation_steps
+            
+            self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss))
+        
+
+    async def schedule_next_step():
+        # Need to think about scheduling policy.
+
+        fwd_ptr = peek_queue(self.fwd_queue)
+        bwd_ptr = peek_queue(self.bwd_queue)
+        softmax_ptr = peek_queue(self.softmax_queue)
+
+        # Combine the elements from the queues
+        combined_queue = fwd_ptr + bwd_ptr + softmax_ptr
+
+        # Sort the combined list based on batch_number and layer_num
+        sorted_list = sorted(combined_list, key=lambda x: (x.batch_number, x.layer_num))
+        
+        tasks = []
+        tasks.append(asyncio.create_task(dispatch_iteration(sorted_list[0])))
+        tasks.append(asyncio.create_task(dispatch_iteration(sorted_list[1])))
+        await asyncio.gather(*tasks)
+
 
     def cleanup(self) -> None:
         if self._is_rank_zero:
