@@ -767,32 +767,27 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         # clean up before training begins
         utils.cleanup_before_training()
 
-        _, rank = utils.get_world_size_and_rank()
-
         # zero out the gradients before starting training
         self._optimizer.zero_grad()
+        
+        num_batches = len(self._dataloader)
 
-        # Initialize tokens count and running loss (for grad accumulation)
+        curr_epoch = self.epochs_run
+        # Update the sampler to ensure data is correctly shuffled across epochs
+        # in case shuffle is True
+        self._sampler.set_epoch(curr_epoch)
+        
 
-        running_loss = 0
-        num_tokens = 0
+        self.fwd_queue.put(QueueObject(0, 0, "fwd", None))
+        self.fwd_queue.put(QueueObject(1, 0, "fwd", None))
+        self.fwd_queue.put(QueueObject(2, 0, "fwd", None))
+        self.fwd_queue.put(QueueObject(3, 0, "fwd", None))
+
+        while True:
+            schedule_next_iteration()
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
-
-            # Update the sampler to ensure data is correctly shuffled across epochs
-            # in case shuffle is True
-            self._sampler.set_epoch(curr_epoch)
-
-            # pbar = tqdm(total=self._steps_per_epoch, disable=not (rank == 0))
-            for idx, batch in enumerate(self._dataloader):
-                if (
-                    self.max_steps_per_epoch is not None
-                    and (idx // self._gradient_accumulation_steps)
-                    == self.max_steps_per_epoch
-                ):
-                    break
-
 
             self.epochs_run += 1
             # self.save_checkpoint(epoch=curr_epoch)
@@ -818,7 +813,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         input_pos = batch.get("input_pos", None)
 
         tokens = tokens.to(self._device)
-        num_tokens += tokens.numel()
         labels = labels.to(self._device)
         mask = mask.to(self._device) if mask is not None else None
         input_pos = input_pos.to(self._device) if input_pos is not None else None
@@ -875,7 +869,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", new_input))
         
         elif item.source == "bwd":
-            running_loss += loss
 
             item.input.backward()
 
@@ -887,10 +880,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
                 # Update the number of steps when the weights are updated
                 self.global_step += 1
-
-                # Reset running stats for the next step
-                running_loss = 0
-                num_tokens = 0
 
             # Get new input
             self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
