@@ -762,7 +762,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
     
     def train_by_step(self) -> None:
         """
-        The core training loop.
+        The core training loop, step by step.
         """
         # clean up before training begins
         utils.cleanup_before_training()
