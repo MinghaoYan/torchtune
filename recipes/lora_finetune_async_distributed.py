@@ -255,12 +255,22 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         )
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
-        self._optimizer = self._setup_optimizer(
+        self._optimizer1 = self._setup_optimizer_async(
             cfg_optimizer=cfg.optimizer,
-            opt_state_dict=checkpoint_dict[utils.OPT_KEY]
-            if self._resume_from_checkpoint
-            else None,
+            idx = 0
         )
+
+        self._optimizer2 = self._setup_optimizer(
+            cfg_optimizer=cfg.optimizer,
+            idx = 1
+        )
+
+        # self._optimizer = self._setup_optimizer(
+        #     cfg_optimizer=cfg.optimizer,
+        #     opt_state_dict=checkpoint_dict[utils.OPT_KEY]
+        #     if self._resume_from_checkpoint
+        #     else None,
+        # )
 
         self._loss_fn = config.instantiate(cfg.loss)
 
@@ -291,10 +301,24 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         # Learning rate scheduler can only be set up after number of steps
         # has been computed
-        self._lr_scheduler = self._setup_lr_scheduler(
+        # self._lr_scheduler = self._setup_lr_scheduler(
+        #     cfg_lr_scheduler=cfg.lr_scheduler,
+        #     num_training_steps=self.total_epochs * self._steps_per_epoch,
+        #     last_epoch=self.global_step - 1,
+        # )
+
+        self._lr_scheduler1 = self._setup_lr_scheduler_async(
             cfg_lr_scheduler=cfg.lr_scheduler,
             num_training_steps=self.total_epochs * self._steps_per_epoch,
             last_epoch=self.global_step - 1,
+            optimizer=self._optimizer1,
+        )
+
+        self._lr_scheduler2 = self._setup_lr_scheduler_async(
+            cfg_lr_scheduler=cfg.lr_scheduler,
+            num_training_steps=self.total_epochs * self._steps_per_epoch,
+            last_epoch=self.global_step - 1,
+            optimizer=self._optimizer2,
         )
 
         # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
@@ -483,6 +507,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
     def _setup_optimizer(
         self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
     ) -> Optimizer:
+        # This is inefficient since there is not need to instantiate the optimizer with all params as based model params are frozen.
         optimizer = config.instantiate(cfg_optimizer, self._model.parameters())
         if opt_state_dict:
             # Note: technically we should check _contains_fsdp for
@@ -496,6 +521,15 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             log.info("Optimizer and loss are initialized.")
         return optimizer
 
+    def _setup_optimizer_async(
+        self, cfg_optimizer: DictConfig, idx: int
+    ) -> Optimizer:
+        # This is inefficient since there is not need to instantiate the optimizer with all params as based model params are frozen.
+        active_params = [param for name, param in model.named_parameters() if f'lora_a_{idx}' in name or f'lora_a_{idx}' in name]
+        optimizer = config.instantiate(cfg_optimizer, active_params)
+
+        return optimizer
+
     def _setup_lr_scheduler(
         self,
         cfg_lr_scheduler: DictConfig,
@@ -505,6 +539,23 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         lr_scheduler = config.instantiate(
             cfg_lr_scheduler,
             self._optimizer,
+            num_training_steps=num_training_steps,
+            last_epoch=last_epoch,
+        )
+        if self._is_rank_zero:
+            log.info("Learning rate scheduler is initialized.")
+        return lr_scheduler
+    
+    def _setup_lr_scheduler_async(
+        self,
+        cfg_lr_scheduler: DictConfig,
+        num_training_steps: int,
+        last_epoch: int,
+        optimizer: torch.optimizer.Optimizer
+    ) -> Optimizer:
+        lr_scheduler = config.instantiate(
+            cfg_lr_scheduler,
+            optimizer,
             num_training_steps=num_training_steps,
             last_epoch=last_epoch,
         )
