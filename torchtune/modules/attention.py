@@ -130,6 +130,7 @@ class CausalSelfAttention(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        activated: Optional[int] = None,
     ) -> Tensor:
         """
         Args:
@@ -272,4 +273,4 @@ class CausalSelfAttention(nn.Module):
 
         # reshape the output to be the same shape as the input
         output = output.transpose(1, 2).contiguous().view(new_bsz, seq_len, -1)
-        return self.output_proj(output)
+        return self.output_proj(output, activated)

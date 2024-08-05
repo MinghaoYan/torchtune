@@ -284,6 +284,7 @@ class LoraTransformerDecoderLayer(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        activated: Optional[int] = None,
     ) -> Tensor:
         """
         Args:
@@ -311,7 +312,7 @@ class LoraTransformerDecoderLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
+        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos, activated=activated)
 
         # Expand x for multiple LoRA adapters
         # print(attn_out.shape, x.shape)
@@ -323,7 +324,7 @@ class LoraTransformerDecoderLayer(nn.Module):
         h = attn_out + x
 
         # Norm applied before the feedforward layer
-        mlp_out = self.mlp(self.mlp_norm(h))
+        mlp_out = self.mlp(self.mlp_norm(h), activated=activated)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + mlp_out
@@ -373,6 +374,7 @@ class LoraTransformerDecoder(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        activated: Optional[int] = None,
     ) -> Tensor:
         """
         Args:
@@ -427,7 +429,7 @@ class LoraTransformerDecoder(nn.Module):
 
         for layer in self.layers:
             # shape: [b, s, d]
-            h = layer(h, mask=mask, input_pos=input_pos)
+            h = layer(h, mask=mask, input_pos=input_pos, activated=activated)
 
         # shape: [b, s, d]
         h = self.norm(h)

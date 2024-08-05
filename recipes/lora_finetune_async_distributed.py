@@ -48,11 +48,12 @@ log = utils.get_logger("DEBUG")
 
 # Sample class to represent objects in the queue with source information
 class QueueObject:
-    def __init__(self, batch_idx, layer_idx, source, layer_input):
+    def __init__(self, batch_idx, layer_idx, source, layer_input, lora_idx):
         self.batch_idx = batch_idx
         self.layer_idx = layer_idx
         self.source = source
         self.input = layer_input
+        self.lora_idx = lora_idx
 
     def __repr__(self):
         return f"QueueObject(batch_number={self.batch_number}, layer_num={self.layer_num}, source='{self.source}')"
@@ -829,10 +830,10 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self._sampler.set_epoch(curr_epoch)
         
 
-        self.fwd_queue.put(QueueObject(0, 0, "fwd", None))
-        self.fwd_queue.put(QueueObject(1, 0, "fwd", None))
-        self.fwd_queue.put(QueueObject(2, 0, "fwd", None))
-        self.fwd_queue.put(QueueObject(3, 0, "fwd", None))
+        self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 0))
+        self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 0))
+        self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 1))
+        self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
 
         while True:
             schedule_next_iteration()
