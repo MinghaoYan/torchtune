@@ -19,11 +19,13 @@ from torchtune.modules import (
     RotaryPositionalEmbeddings,
     TransformerDecoder,
     TransformerDecoderLayer,
+    LoraTransformerDecoder,
+    LoraTransformerDecoderLayer,
 )
 
 from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
 
-from torchtune.modules.peft import LORA_ATTN_MODULES, LoRALinear
+from torchtune.modules.peft import LORA_ATTN_MODULES, LoRALinear, InterleavedLoRALinear
 
 """
 Component builders for the Llama3 model and popular variants such as LoRA.
@@ -424,6 +426,44 @@ def lora_llama3_mlp(
 
 
 
+def async_lora_llama3_mlp(
+    *,
+    dim: int,
+    hidden_dim: int,
+    lora_rank: int,
+    lora_alpha: float,
+    lora_dropout: float = 0.0,
+    quantize_base: bool = False,
+) -> FeedForward:
+    gate_proj = InterleavedLoRALinear(
+        in_dim=dim,
+        out_dim=hidden_dim,
+        rank=lora_rank,
+        alpha=lora_alpha,
+        dropout=lora_dropout,
+        quantize_base=quantize_base,
+    )
+    down_proj = InterleavedLoRALinear(
+        in_dim=hidden_dim,
+        out_dim=dim,
+        rank=lora_rank,
+        alpha=lora_alpha,
+        dropout=lora_dropout,
+        quantize_base=quantize_base,
+    )
+    up_proj = InterleavedLoRALinear(
+        in_dim=dim,
+        out_dim=hidden_dim,
+        rank=lora_rank,
+        alpha=lora_alpha,
+        dropout=lora_dropout,
+        quantize_base=quantize_base,
+    )
+    return FeedForward(
+        gate_proj=gate_proj,
+        down_proj=down_proj,
+        up_proj=up_proj,
+    )
 
 
 def async_lora_llama3(
@@ -482,8 +522,8 @@ def async_lora_llama3(
         attn_dropout=attn_dropout,
     )
     hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
-    mlp = llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)
-    layer = TransformerDecoderLayer(
+    mlp = async_llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)
+    layer = LoraTransformerDecoderLayer(
         attn=self_attn,
         mlp=mlp,
         sa_norm=RMSNorm(dim=embed_dim, eps=norm_eps),
@@ -492,7 +532,7 @@ def async_lora_llama3(
     tok_embeddings = nn.Embedding(vocab_size, embed_dim)
     output_proj = nn.Linear(embed_dim, vocab_size, bias=False)
     
-    lora = llama3_lora(dim=embed_dim,
+    lora = async_llama3_lora(dim=embed_dim,
             hidden_dim=hidden_dim,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,

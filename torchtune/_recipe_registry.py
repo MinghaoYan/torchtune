@@ -171,6 +171,14 @@ _ALL_RECIPES = [
         supports_distributed=True,
     ),
     Recipe(
+        name="lora_finetune_async_distributed",
+        file_path="lora_finetune_async_distributed.py",
+        configs=[
+            Config(name="llama3/8B_lora", file_path="llama3/8B_lora.yaml"),
+        ],
+        supports_distributed=True,
+    ),
+    Recipe(
         name="lora_finetune_multi_sync_distributed",
         file_path="lora_finetune_multi_sync_distributed.py",
         configs=[

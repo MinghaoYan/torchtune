@@ -33,5 +33,5 @@ class FeedForward(nn.Module):
         self.w3 = up_proj
         self.activation = activation
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.w2(self.activation(self.w1(x)) * self.w3(x))
+    def forward(self, x: Tensor, activated: Optional[int] = None) -> Tensor:
+        return self.w2(self.activation(self.w1(x, activated)) * self.w3(x, activated), activated)

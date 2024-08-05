@@ -11,7 +11,7 @@ from .kv_cache import KVCache  # noqa
 from .lr_schedulers import get_cosine_schedule_with_warmup  # noqa
 from .position_embeddings import RotaryPositionalEmbeddings  # noqa
 from .rms_norm import RMSNorm  # noqa
-from .transformer import TransformerDecoder, TransformerDecoderLayer  # noqa
+from .transformer import TransformerDecoder, TransformerDecoderLayer, LoraTransformerDecoder, LoraTransformerDecoderLayer  # noqa
 
 __all__ = [
     "CausalSelfAttention",
@@ -23,4 +23,6 @@ __all__ = [
     "TransformerDecoder",
     "TransformerDecoderLayer",
     "reparametrize_as_dtype_state_dict_post_hook",
+    "LoraTransformerDecoder",
+    "LoraTransformerDecoderLayer",
 ]
