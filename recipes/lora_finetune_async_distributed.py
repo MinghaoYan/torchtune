@@ -835,8 +835,26 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 1))
         self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
 
+        tasks = set()
         while True:
-            schedule_next_iteration()
+            fwd_ptr = self.peek_queue(self.fwd_queue)
+            bwd_ptr = self.peek_queue(self.bwd_queue)
+            softmax_ptr = self.peek_queue(self.softmax_queue)
+
+            combined_queue = fwd_ptr + bwd_ptr + softmax_ptr
+            sorted_list = sorted(combined_queue, key=lambda x: (x.batch_number, x.layer_num))
+
+            if len(sorted_list) > 0:
+                if len(tasks) < 2:
+                    tasks.add(asyncio.create_task(self.dispatch_iteration(sorted_list[0])))
+
+                if len(sorted_list) > 1 and len(tasks) < 2:
+                    tasks.add(asyncio.create_task(self.dispatch_iteration(sorted_list[1])))
+
+            if tasks:
+                # Wait for the first completed task
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
 
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -952,26 +970,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             loss = loss / self._gradient_accumulation_steps
             
             self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss))
-        
-
-    async def schedule_next_step():
-        # Need to think about scheduling policy.
-
-        fwd_ptr = peek_queue(self.fwd_queue)
-        bwd_ptr = peek_queue(self.bwd_queue)
-        softmax_ptr = peek_queue(self.softmax_queue)
-
-        # Combine the elements from the queues
-        combined_queue = fwd_ptr + bwd_ptr + softmax_ptr
-
-        # Sort the combined list based on batch_number and layer_num
-        sorted_list = sorted(combined_list, key=lambda x: (x.batch_number, x.layer_num))
-        
-        tasks = []
-        tasks.append(asyncio.create_task(dispatch_iteration(sorted_list[0])))
-        tasks.append(asyncio.create_task(dispatch_iteration(sorted_list[1])))
-        await asyncio.gather(*tasks)
-
+    
 
     def cleanup(self) -> None:
         if self._is_rank_zero:
