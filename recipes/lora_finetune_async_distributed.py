@@ -43,6 +43,8 @@ from collections import deque
 
 import asyncio
 
+import math
+
 log = utils.get_logger("DEBUG")
 
 
@@ -282,6 +284,17 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
         )
+
+        # Total number of data points in the dataset
+        total_data_points = len(self._dataloader.dataset)
+
+        # Batch size
+        batch_size = self._dataloader.batch_size
+
+        # Calculate number of batches
+        self.num_batches = math.ceil(total_data_points / batch_size)
+
+        self.processed_batches = [0, 0]
 
         # Finally update the recipe state which can only be correctly set after all of the
         # other components have been initialized and updated.
@@ -821,8 +834,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         # zero out the gradients before starting training
         self._optimizer.zero_grad()
-        
-        num_batches = len(self._dataloader)
 
         curr_epoch = self.epochs_run
         # Update the sampler to ensure data is correctly shuffled across epochs
@@ -836,7 +847,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
 
         tasks = set()
-        while True:
+        while self.fwd_queue or self.bwd_queue or self.softmax_queue:
             fwd_ptr = self.peek_queue(self.fwd_queue)
             bwd_ptr = self.peek_queue(self.bwd_queue)
             softmax_ptr = self.peek_queue(self.softmax_queue)
@@ -854,13 +865,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             if tasks:
                 # Wait for the first completed task
                 done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
-
-        # self.epochs_run should be non-zero when we're resuming from a checkpoint
-        for curr_epoch in range(self.epochs_run, self.total_epochs):
-
-            self.epochs_run += 1
-            # self.save_checkpoint(epoch=curr_epoch)
 
 
     async def peek_queue(q):
@@ -950,9 +954,11 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
                 # Update the number of steps when the weights are updated
                 self.global_step += 1
-
+            
+            processed_batches[item.lora_idx] += 1
             # Get new input
-            self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
+            if processed_batches[item.lora_idx] < self.num_batches * (self.total_epochs - self.epochs_run):
+                self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
 
         elif item.source == "softmax":
 
