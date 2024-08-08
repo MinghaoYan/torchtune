@@ -166,7 +166,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.bwd_queue = deque()
         self.softmax_queue = deque()
 
-        self.num_layers = num_layers
+        # self.num_layers = num_layers
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
@@ -468,6 +468,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         if self._dtype == torch.bfloat16:
             model = model.to(torch.bfloat16)
 
+        self.num_layers = len(model.layers)
+
         # LoRA hyper-params needed for merging weights while saving checkpoints
         self._lora_rank = cfg_model.lora_rank
         self._lora_alpha = cfg_model.lora_alpha
@@ -539,7 +541,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self, cfg_optimizer: DictConfig, idx: int
     ) -> Optimizer:
         # This is inefficient since there is not need to instantiate the optimizer with all params as based model params are frozen.
-        active_params = [param for name, param in model.named_parameters() if f'lora_a_{idx}' in name or f'lora_a_{idx}' in name]
+        active_params = [param for name, param in self._model.named_parameters() if f'lora_a_{idx}' in name or f'lora_a_{idx}' in name]
         optimizer = config.instantiate(cfg_optimizer, active_params)
 
         return optimizer
@@ -565,7 +567,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         cfg_lr_scheduler: DictConfig,
         num_training_steps: int,
         last_epoch: int,
-        optimizer: torch.optimizer.Optimizer
+        optimizer: Optimizer
     ) -> Optimizer:
         lr_scheduler = config.instantiate(
             cfg_lr_scheduler,
@@ -825,7 +827,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self._profiler.stop()
 
     
-    def train_by_step(self) -> None:
+    async def train_by_step(self) -> None:
         """
         The core training loop, step by step.
         """
@@ -909,9 +911,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         elif item.source == "bwd":
             if layer_idx == self.num_layers - 1:
                 #TODO: handle 
-            
-            loss = criterion(activation, target)
-            loss.backward(retain_graph=True)
+                loss = criterion(activation, target)
+                loss.backward(retain_graph=True)
 
 
             if layer_idx == 0:
@@ -1003,9 +1004,9 @@ def recipe_main(cfg: DictConfig) -> None:
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
 
-    config.log_config(recipe_name="LoRAFinetuneRecipeDistributed", cfg=cfg)
+    config.log_config(recipe_name="LoRAFinetuneRecipeAsyncDistributed", cfg=cfg)
 
-    recipe = LoRAFinetuneRecipeDistributed(cfg=cfg)
+    recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
     recipe.cleanup()

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torch import nn, Tensor
+from typing import Optional
 
 
 class FeedForward(nn.Module):
