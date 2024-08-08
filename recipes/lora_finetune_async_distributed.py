@@ -263,7 +263,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             idx = 0
         )
 
-        self._optimizer2 = self._setup_optimizer(
+        self._optimizer2 = self._setup_optimizer_async(
             cfg_optimizer=cfg.optimizer,
             idx = 1
         )
@@ -1008,7 +1008,8 @@ def recipe_main(cfg: DictConfig) -> None:
 
     recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
-    recipe.train()
+    # recipe.train()
+    recipe.train_by_step()
     recipe.cleanup()
 
 
