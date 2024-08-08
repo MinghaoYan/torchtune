@@ -847,13 +847,15 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
 
         tasks = set()
+        priority_map = {'fwd': 1, 'softmax': 2, 'bwd': 3}
+
         while self.fwd_queue or self.bwd_queue or self.softmax_queue:
             fwd_ptr = self.peek_queue(self.fwd_queue)
             bwd_ptr = self.peek_queue(self.bwd_queue)
             softmax_ptr = self.peek_queue(self.softmax_queue)
 
             combined_queue = fwd_ptr + bwd_ptr + softmax_ptr
-            sorted_list = sorted(combined_queue, key=lambda x: (x.batch_number, x.layer_num))
+            sorted_list = sorted(combined_queue, key=lambda x: (x.batch_number, priority_map[x.source]))
 
             if len(sorted_list) > 0:
                 if len(tasks) < 2:
