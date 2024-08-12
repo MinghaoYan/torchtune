@@ -39,7 +39,7 @@ from torchtune.utils import DummyProfiler, PROFILER_KEY
 
 from tqdm import tqdm
 
-from collections import deque
+from queue import Queue
 
 import asyncio
 
@@ -48,7 +48,6 @@ import math
 log = utils.get_logger("DEBUG")
 
 
-# Sample class to represent objects in the queue with source information
 class QueueObject:
     def __init__(self, batch_idx, layer_idx, source, layer_input, lora_idx):
         self.batch_idx = batch_idx
@@ -162,9 +161,9 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.num_adapters = len(cfg.model.lora_rank)
 
         # These are the queues for forward / backward / softmax passes that are yet to be executed
-        self.fwd_queue = deque()
-        self.bwd_queue = deque()
-        self.softmax_queue = deque()
+        self.fwd_queue = Queue()
+        self.bwd_queue = Queue()
+        self.softmax_queue = Queue()
 
         # self.num_layers = num_layers
 
@@ -826,6 +825,10 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         self._profiler.stop()
 
+    def peek_queue(self, q):
+        if not q.queue:
+            return None
+        return [q.queue[0]]
     
     async def train_by_step(self) -> None:
         """
@@ -853,12 +856,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         priority_map = {'fwd': 1, 'softmax': 2, 'bwd': 3}
 
         while self.fwd_queue or self.bwd_queue or self.softmax_queue:
-            fwd_ptr = self.peek_queue(self.fwd_queue)
-            bwd_ptr = self.peek_queue(self.bwd_queue)
-            softmax_ptr = self.peek_queue(self.softmax_queue)
+            fwd_ptr = self.peek_queue(self.fwd_queue) or []
+            bwd_ptr = self.peek_queue(self.bwd_queue) or []
+            softmax_ptr = self.peek_queue(self.softmax_queue) or []
 
             combined_queue = fwd_ptr + bwd_ptr + softmax_ptr
-            sorted_list = sorted(combined_queue, key=lambda x: (x.batch_number, priority_map[x.source]))
+            sorted_list = sorted(combined_queue, key=lambda x: (x.batch_idx, priority_map[x.source]))
 
             if len(sorted_list) > 0:
                 if len(tasks) < 2:
@@ -871,35 +874,56 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 # Wait for the first completed task
                 done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-
-    async def peek_queue(q):
-        with q.mutex:
-            if not q.queue:
-                return None
-            return q.queue[0]
-
-    async def retrieve_data(batch_idx):
+    def retrieve_data(self, batch_idx):
         # Calculate the start and end indices for the batch
-        start_index = batch_index * self._dataloader.batch_size
+        start_index = batch_idx * self._dataloader.batch_size
         end_index = start_index + self._dataloader.batch_size
 
-        # Access the specific batch
-        batch = self._dataloader.dataset[start_index:end_index]
+        if self._is_rank_zero:
+            print(f"Start index: {start_index}, End index: {end_index}")
+
+        # Create a list of indices for the batch
+        subset_indices = list(range(start_index, end_index))
+        
+        # Create a Subset from the dataset using the calculated indices
+        subset = torch.utils.data.Subset(self._dataloader.dataset, subset_indices)
+        
+        # Create a DataLoader for this subset
+        subset_loader = torch.utils.data.DataLoader(subset, batch_size=self._dataloader.batch_size, num_workers=0, 
+                shuffle=False, collate_fn=partial(
+                                            utils.padded_collate,
+                                            padding_idx=self._tokenizer.pad_id,
+                                            ignore_idx=self._loss_fn.ignore_index,
+                                        ))
+        
+        # Retrieve the batch from the subset DataLoader
+        batch = next(iter(subset_loader))
 
         # Process the batch as usual
-        tokens, labels = batch["tokens"], batch["labels"]
+        tokens = batch["tokens"]
+        labels = batch["labels"]
         mask = batch.get("mask", None)
         input_pos = batch.get("input_pos", None)
 
+        if self._is_rank_zero:
+            print(f"tokens are: {tokens}")
+            print(f"labels are: {labels}")
+            print(f"mask are: {mask}")
+
+        # Convert to tensors if they are not already
         tokens = tokens.to(self._device)
         labels = labels.to(self._device)
         mask = mask.to(self._device) if mask is not None else None
         input_pos = input_pos.to(self._device) if input_pos is not None else None
 
+        if self._is_rank_zero:
+            print(f"tokens shapes are: {tokens.shape}")
+            print(f"labels shapes are: {labels.shape}")
+
         return tokens, mask, input_pos
 
 
-    async def dispatch_layer(item):
+    async def dispatch_layer(self, item):
         if item.source == "fwd":
             new_input = self.layers[item.layer_idx](layer_input)
 
@@ -940,14 +964,15 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             
             self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss))
 
-    async def dispatch_iteration(item):
+    async def dispatch_iteration(self, item):
         if item.source == "fwd":
-            tokens, mask, input_pos = retrieve_data(item.batch_idx)
+            self.fwd_queue.get()
+            tokens, mask, input_pos = self.retrieve_data(item.batch_idx)
             logits = self._model(tokens, mask=mask, input_pos=input_pos)
             self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", new_input))
         
         elif item.source == "bwd":
-
+            self.bwd_queue.get()
             item.input.backward()
 
             # Step with optimizer
@@ -965,6 +990,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
 
         elif item.source == "softmax":
+            self.softmax_queue.get()
 
             logits = item.input[..., :-1, :].contiguous()
             labels = labels[..., 1:].contiguous()
