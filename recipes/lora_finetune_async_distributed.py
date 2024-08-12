@@ -835,7 +835,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         utils.cleanup_before_training()
 
         # zero out the gradients before starting training
-        self._optimizer.zero_grad()
+        self._optimizer1.zero_grad()
+        self._optimizer2.zero_grad()
 
         curr_epoch = self.epochs_run
         # Update the sampler to ensure data is correctly shuffled across epochs
@@ -1009,7 +1010,7 @@ def recipe_main(cfg: DictConfig) -> None:
     recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
     # recipe.train()
-    recipe.train_by_step()
+    asyncio.run(recipe.train_by_step())
     recipe.cleanup()
 
 
