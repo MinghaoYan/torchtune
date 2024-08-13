@@ -568,7 +568,7 @@ def async_lora_llama3(
         quantize_base=quantize_base,
         lora_dropout=lora_dropout)
 
-    return = LoraTransformerDecoder(lora=lora, 
+    return LoraTransformerDecoder(lora=lora, 
         base_model = TransformerDecoder(
             tok_embeddings=tok_embeddings,
             layer=layer,
