@@ -33,6 +33,7 @@ from torchtune.modules.peft.peft_utils import (
     get_merged_lora_ckpt,
     set_trainable_params,
     validate_state_dict_for_lora,
+    validate_state_dict_for_lora_async,
 )
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.utils import DummyProfiler, PROFILER_KEY
@@ -244,7 +245,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self._metric_logger.log_config(cfg)
 
         checkpoint_dict = self.load_checkpoint(cfg_checkpointer=cfg.checkpointer)
-
+        # print(checkpoint_dict)
         self._model = self._setup_model(
             cfg_model=cfg.model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
@@ -440,7 +441,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             # Before loading the state dict, ensure the state dict keys for the base
             # model and adapters (if available) match the keys in the full LoRA model
             # This is a good sanity check to prevent silent errors
-            validate_state_dict_for_lora(
+            validate_state_dict_for_lora_async(
                 lora_attn_modules=cfg_model.lora_attn_modules,
                 apply_lora_to_mlp=cfg_model.apply_lora_to_mlp,
                 apply_lora_to_output=getattr(cfg_model, "apply_lora_to_output", False),

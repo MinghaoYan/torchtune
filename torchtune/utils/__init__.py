@@ -50,6 +50,7 @@ from .constants import (  # noqa
     OPT_KEY,
     SEED_KEY,
     TOTAL_EPOCHS_KEY,
+    DECODER_KEY,
 )
 from .logging import get_logger
 from .memory import (  # noqa

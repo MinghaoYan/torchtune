@@ -361,12 +361,58 @@ class LoraTransformerDecoder(nn.Module):
     def __init__(
         self,
         lora: nn.Module,
-        decoder: nn.Module,
+        tok_embeddings: nn.Embedding,
+        layer: LoraTransformerDecoderLayer,
+        num_layers: int,
+        max_seq_len: int,
+        num_heads: int,
+        head_dim: int,
+        norm: nn.Module,
+        output: nn.Linear,
     ) -> None:
         super().__init__()
 
-        self.lora = lora
-        self.decoder = decoder
+        self.lora=lora
+        self.tok_embeddings = tok_embeddings
+        self.layers = _get_clones(layer, num_layers)
+        self.norm = norm
+        self.output = output
+        self.max_seq_len = max_seq_len
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.causal_mask = None
+
+    def setup_caches(self, batch_size: int, dtype: torch.dtype) -> None:
+        """Setup key value caches for attention calculation.
+
+        Args:
+            batch_size (int): batch size for the caches.
+            dtype (torch.dtype): dtype for the caches.
+        """
+        for layer in self.layers:
+            layer.attn.kv_cache = KVCache(
+                batch_size=batch_size,
+                max_seq_len=self.max_seq_len,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                dtype=dtype,
+            )
+
+        # causal_mask is used during inference to ensure we're attending
+        # to the right tokens
+        self.causal_mask = torch.tril(
+            torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool)
+        )
+
+    def reset_caches(self):
+        """Reset the key value caches."""
+        if self.layers[0].attn.kv_cache is None:
+            raise RuntimeError(
+                "Key value caches are not setup. Call ``setup_caches()`` first."
+            )
+
+        for layer in self.layers:
+            layer.attn.kv_cache.reset()
 
     def forward(
         self,
@@ -374,7 +420,6 @@ class LoraTransformerDecoder(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
-        activated: Optional[int] = None,
     ) -> Tensor:
         """
         Args:
@@ -429,7 +474,7 @@ class LoraTransformerDecoder(nn.Module):
 
         for layer in self.layers:
             # shape: [b, s, d]
-            h = layer(h, mask=mask, input_pos=input_pos, activated=activated)
+            h = layer(h, mask=mask, input_pos=input_pos)
 
         # shape: [b, s, d]
         h = self.norm(h)

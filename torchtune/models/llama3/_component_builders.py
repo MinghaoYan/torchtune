@@ -7,6 +7,7 @@
 from functools import partial
 from typing import List, Literal, Optional
 
+import torch
 from torch import nn
 
 from torchtune.models.llama3._model_utils import scale_hidden_dim_for_mlp
@@ -561,7 +562,6 @@ def async_lora_llama3(
         rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)
 
     return LoraTransformerDecoder(lora=lora, 
-        decoder = TransformerDecoder(
             tok_embeddings=tok_embeddings,
             layer=layer,
             num_layers=num_layers,
@@ -570,4 +570,4 @@ def async_lora_llama3(
             head_dim=head_dim,
             norm=RMSNorm(embed_dim, eps=norm_eps),
             output=output_proj
-        ))
+        )

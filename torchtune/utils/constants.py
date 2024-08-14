@@ -17,6 +17,7 @@ ADAPTER_KEY = "adapter"
 EPOCHS_KEY = "epochs_run"
 MAX_STEPS_KEY = "max_steps_per_epoch"
 MODEL_KEY = "model"
+DECODER_KEY = "model.decoder"
 OPT_KEY = "optimizer"
 SEED_KEY = "seed"
 # total number of epochs for training; resumed training runs for
