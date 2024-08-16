@@ -415,8 +415,8 @@ def validate_state_dict_for_lora_async(
         lora_attn_modules, apply_lora_to_mlp, apply_lora_to_output
     )
     is_lora_param = lambda x: "lora" in x
-    print(full_model_state_dict_keys)
-    print(base_model_state_dict_keys)
+    # print(full_model_state_dict_keys)
+    # print(base_model_state_dict_keys)
     for k in full_model_state_dict_keys:
         if not is_lora_param(k):
             if base_model_state_dict_keys is not None:

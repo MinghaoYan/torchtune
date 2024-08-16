@@ -906,10 +906,10 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         mask = batch.get("mask", None)
         input_pos = batch.get("input_pos", None)
 
-        if self._is_rank_zero:
-            print(f"tokens are: {tokens}")
-            print(f"labels are: {labels}")
-            print(f"mask are: {mask}")
+        # if self._is_rank_zero:
+        #     print(f"tokens are: {tokens}")
+        #     print(f"labels are: {labels}")
+        #     print(f"mask are: {mask}")
 
         # Convert to tensors if they are not already
         tokens = tokens.to(self._device)
@@ -917,9 +917,9 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         mask = mask.to(self._device) if mask is not None else None
         input_pos = input_pos.to(self._device) if input_pos is not None else None
 
-        if self._is_rank_zero:
-            print(f"tokens shapes are: {tokens.shape}")
-            print(f"labels shapes are: {labels.shape}")
+        # if self._is_rank_zero:
+        #     print(f"tokens shapes are: {tokens.shape}")
+        #     print(f"labels shapes are: {labels.shape}")
 
         return tokens, mask, input_pos
 
@@ -969,7 +969,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         if item.source == "fwd":
             self.fwd_queue.get()
             tokens, mask, input_pos = self.retrieve_data(item.batch_idx)
-            logits = self._model(tokens, mask=mask, input_pos=input_pos)
+            logits = self._model(tokens, mask=mask, input_pos=input_pos, activated=item.lora_idx)
             self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", new_input))
         
         elif item.source == "bwd":

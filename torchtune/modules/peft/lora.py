@@ -308,7 +308,7 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             adapter_params.append(f"lora_b_1_{idx}.weight")
         return adapter_params
 
-    def forward(self, x: Tensor, activated: int) -> Tensor:
+    def forward(self, x: Tensor, activated: int = 0) -> Tensor:
         """
         Args:
             x (Tensor): input tensor with shape ``(..., in_dim)``
@@ -327,13 +327,13 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         # Handle first layer
         # total_dim = len(self.rank) * 
         # if x.shape[0] == 1:
-        # print(f"Lora input dim is {x.shape}")
+        print(f"Lora input dim is {x.shape}")
         lora_out = []
         num_adapters = len(self.rank)
         # print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
         if x.shape[0] == self.bsz and num_adapters > 1:
             x = x.repeat(num_adapters, 1, 1)
-        # print(f"Lora input dim after repeat is {x.shape}")
+        print(f"Lora input dim after repeat is {x.shape}")
         after_dropout = self.dropout(x)
         bsz = x.shape[0] // num_adapters
 
@@ -359,6 +359,8 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             else:
                 final_results = scaled_results + out
 
+            print(f"final_results shape is {final_results.shape}")
+
             lora_out.append(final_results)
         
         # Disable gradients for inactive LoRA parameters
@@ -370,6 +372,9 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             for param in lora_b_inactive.parameters():
                 param.requires_grad = False
         
-        total_out = torch.stack(lora_out, dim=0)
-        
+        if lora_out[0].dim() == 3:
+            total_out = torch.stack(lora_out, dim=0)
+        elif lora_out[0].dim() == 4:
+            total_out = torch.cat(lora_out, dim=0)
+        print(f"lora out len is {len(lora_out)} total out shape is {total_out.shape}")
         return total_out

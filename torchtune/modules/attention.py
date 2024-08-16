@@ -167,8 +167,11 @@ class CausalSelfAttention(nn.Module):
             - Make application of positional embeddings optional
         """
         # input has shape [b, s, d]
-        # print(f"attention input shape is {x.shape}")
-        _, seq_len, _ = x.shape
+        print(f"attention input shape is {x.shape}")
+        if x.dim() == 3:
+            _, seq_len, _ = x.shape
+        elif x.dim() == 4:
+            _, _, seq_len, _ = x.shape
         bsz = self.bsz
 
         if seq_len > self.max_seq_len:
@@ -221,36 +224,37 @@ class CausalSelfAttention(nn.Module):
         # print(f"new bsz is ", bsz)
             
         
-        new_bsz = bsz * max_len
+        # new_bsz = bsz * max_len
 
         # q: [b, s, n_kv, q_per_kv, h_d]
         # k: [b, s, n_kv, 1, h_d]
         # v: [b, s, n_kv, 1, h_d]
-        q = q.reshape(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-        k = k.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
-        v = v.reshape(new_bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+        q = q.reshape(max_len, bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+        k = k.reshape(max_len, bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+        v = v.reshape(max_len, bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
 
         # if needed, expand the key and value tensors to have the same shape
         # as the query tensor by copying values across the relevant dim
         if self.num_heads != self.num_kv_heads:
-            k = k.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-            v = v.expand(new_bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            k = k.expand(max_len, bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            v = v.expand(max_len, bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
 
         # llama2 applies the RoPE embeddings on tensors with shape
         # [b, s, n_h, h_d]
         # Reshape the tensors before we apply RoPE
-        q = q.reshape(new_bsz, seq_len, -1, self.head_dim)
-        k = k.reshape(new_bsz, seq_len, -1, self.head_dim)
-        v = v.reshape(new_bsz, seq_len, -1, self.head_dim)
+        q = q.reshape(max_len, bsz, seq_len, -1, self.head_dim)
+        k = k.reshape(max_len, bsz, seq_len, -1, self.head_dim)
+        v = v.reshape(max_len, bsz, seq_len, -1, self.head_dim)
 
         # Apply positional embeddings
+        # print(f"q shape is {q.shape}, input shape is {input_pos.shape}")
         q = self.pos_embeddings(q, input_pos=input_pos)
         k = self.pos_embeddings(k, input_pos=input_pos)
 
         # [b, n_h, s, h_d]
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        q = q.transpose(2, 3)
+        k = k.transpose(2, 3)
+        v = v.transpose(2, 3)
 
         # Update key-value cache
         if self.kv_cache is not None:
@@ -258,7 +262,7 @@ class CausalSelfAttention(nn.Module):
 
         # shape: [b, 1, s, s]
         if mask is not None:
-            mask = mask[:, None, :, :]
+            mask = mask[:, :, None, :, :]
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
         # manual implementation of attention
@@ -272,5 +276,7 @@ class CausalSelfAttention(nn.Module):
         )
 
         # reshape the output to be the same shape as the input
-        output = output.transpose(1, 2).contiguous().view(new_bsz, seq_len, -1)
+        output = output.transpose(2, 3).contiguous().view(max_len, bsz, seq_len, -1)
+        print(f"attention output shape is {output.shape}")
+
         return self.output_proj(output, activated)

@@ -312,14 +312,17 @@ class LoraTransformerDecoderLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
+        # print(f"Decoder layer input shape is {x.shape}")
+        # norm_x = self.sa_norm(x)
+        # print(f"Decoder layer norm x input shape is {x.shape}")
         attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos, activated=activated)
 
         # Expand x for multiple LoRA adapters
-        # print(attn_out.shape, x.shape)
+        print(f"before repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
         if attn_out.shape[0] > x.shape[0]:
             repeat_factor = attn_out.shape[0] // x.shape[0]
             x = x.repeat(repeat_factor, 1, 1)
-
+        print(f"after repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
 
@@ -453,9 +456,11 @@ class LoraTransformerDecoder(nn.Module):
         """
         # input tensor of shape [b, s]
         bsz, seq_len = tokens.shape
+        # print(f"Decoder token shape is {tokens.shape}")
 
         # shape: [b, s, d]
         h = self.tok_embeddings(tokens)
+        # print(f"Decoder token emb shape is {h.shape}")
 
         if self.causal_mask is not None:
             if input_pos is None:
@@ -470,10 +475,15 @@ class LoraTransformerDecoder(nn.Module):
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
 
+        count = 0
         for layer in self.layers:
             # shape: [b, s, d]
+            print(f"layer {count} input shape is {h.shape}")
             h = layer(h, mask=mask, input_pos=input_pos, activated=activated)
 
+            print(f"layer {count} output shape is {h.shape}")
+            count+= 1
+        
         # shape: [b, s, d]
         h = self.norm(h)
 
