@@ -329,6 +329,8 @@ class LoraTransformerDecoderLayer(nn.Module):
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h), activated=activated)
 
+        print(f"mlp shape is {mlp_out.shape}")
+
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + mlp_out
         return out

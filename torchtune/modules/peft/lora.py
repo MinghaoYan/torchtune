@@ -324,17 +324,14 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         if self.disabled:
             return out
 
-        # Handle first layer
-        # total_dim = len(self.rank) * 
-        # if x.shape[0] == 1:
-        print(f"Lora input dim is {x.shape}")
+        # print(f"Lora input dim is {x.shape}")
         lora_out = []
         num_adapters = len(self.rank)
         # print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
         if x.dim() == 3 and num_adapters > 1:
             x = x.repeat(num_adapters, 1, 1)
             x = x.view(num_adapters, -1, x.shape[1], x.shape[2])
-        print(f"Lora input dim after repeat is {x.shape}")
+        # print(f"Lora input dim after repeat is {x.shape}")
         after_dropout = self.dropout(x)
         bsz = x.shape[0] // num_adapters
 
@@ -348,21 +345,21 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
                 param.requires_grad = True
 
         for idx in range(num_adapters):
-            print(f"after dropout shape is {after_dropout.shape}")
+            # print(f"after dropout shape is {after_dropout.shape}")
             lora_a_slice = after_dropout[idx, :, :, :]
-            print(f"lora a slice shape is {lora_a_slice.shape}")
+            # print(f"lora a slice shape is {lora_a_slice.shape}")
             
             lora_after_a = getattr(self, f'lora_a_{activated}_{idx}')(lora_a_slice)
             lora_after_b = getattr(self, f'lora_b_{activated}_{idx}')(lora_after_a)
 
             scaled_results = (self.alpha[idx] / self.rank[idx]) * lora_after_b
 
-            if out.shape[0] > self.bsz:
+            if out.dim() == 4:
                 final_results = scaled_results + out[idx, :, :, :]
-            else:
+            elif out.dim() == 3:
                 final_results = scaled_results + out
 
-            print(f"final_results shape is {final_results.shape}")
+            # print(f"final_results shape is {final_results.shape}")
 
             lora_out.append(final_results)
         
@@ -379,5 +376,5 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             total_out = torch.stack(lora_out, dim=0)
         elif lora_out[0].dim() == 4:
             total_out = torch.cat(lora_out, dim=0)
-        print(f"lora out len is {len(lora_out)} total out shape is {total_out.shape}")
+        # print(f"lora out len is {len(lora_out)} total out shape is {total_out.shape}")
         return total_out
