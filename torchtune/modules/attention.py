@@ -180,9 +180,9 @@ class CausalSelfAttention(nn.Module):
         # q has shape [b, s, num_heads * head_dim]
         # k has shape [b, s, num_kv_heads * head_dim]
         # v has shape [b, s, num_kv_heads * head_dim]
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        q = self.q_proj(x, activated)
+        k = self.k_proj(x, activated)
+        v = self.v_proj(x, activated)
 
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads

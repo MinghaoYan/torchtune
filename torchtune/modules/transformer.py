@@ -360,7 +360,6 @@ class LoraTransformerDecoder(nn.Module):
 
     def __init__(
         self,
-        lora: nn.Module,
         tok_embeddings: nn.Embedding,
         layer: LoraTransformerDecoderLayer,
         num_layers: int,
@@ -371,8 +370,6 @@ class LoraTransformerDecoder(nn.Module):
         output: nn.Linear,
     ) -> None:
         super().__init__()
-
-        self.lora=lora
         self.tok_embeddings = tok_embeddings
         self.layers = _get_clones(layer, num_layers)
         self.norm = norm
@@ -420,6 +417,7 @@ class LoraTransformerDecoder(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        activated: Optional[int] = None,
     ) -> Tensor:
         """
         Args:
@@ -474,7 +472,7 @@ class LoraTransformerDecoder(nn.Module):
 
         for layer in self.layers:
             # shape: [b, s, d]
-            h = layer(h, mask=mask, input_pos=input_pos)
+            h = layer(h, mask=mask, input_pos=input_pos, activated=activated)
 
         # shape: [b, s, d]
         h = self.norm(h)

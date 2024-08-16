@@ -241,7 +241,7 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         # this can be used in DPO for treating the lora adapters as the policy model
         # and disabling it to treat the base model as the reference model
         self.disabled = False
-        # self.register_parameter("weight", nn.Parameter(weight))
+        self.register_parameter("weight", nn.Parameter(weight))
         self.register_parameter(
             "bias", nn.Parameter(bias) if bias is not None else None
         )
@@ -320,7 +320,7 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         if self._quantize_base:
             out = linear_nf4(input=x, weight=self.weight)
         else:
-            out = F.linear(x, self.weight, self.bias)
+            out = F.linear(x, self.weight, None)
         if self.disabled:
             return out
 

@@ -467,6 +467,130 @@ def async_lora_llama3_mlp(
     )
 
 
+def async_lora_llama3_self_attention(
+    lora_modules: List[LORA_ATTN_MODULES],
+    *,
+    # CausalSelfAttention args
+    embed_dim: int,
+    num_heads: int,
+    num_kv_heads: int,
+    max_seq_len: int,
+    attn_dropout: float = 0.0,
+    rope_base: float = 500000.0,
+    # LoRA args
+    lora_rank: int,
+    lora_alpha: float,
+    lora_dropout: float = 0.0,
+    quantize_base: bool = False,
+    bsz: int,
+) -> CausalSelfAttention:
+    """
+    Return an instance of :func:`~torchtune.modules.CausalSelfAttention` with LoRA
+    applied to a subset of its linear layers
+
+    Args:
+        lora_modules (List[LORA_ATTN_MODULES]): list of which linear layers
+            LoRA should be applied to. Options are ``{"q_proj", "k_proj", "v_proj",
+            "output_proj"}``.
+        embed_dim (int): embedding dimension for self-attention
+        num_heads (int): number of query heads. For MHA this is also the
+            number of heads for key and value
+        num_kv_heads (int): number of key and value heads. If specified,
+            user should ensure `num_heads` % `num_kv_heads` == 0. Default value is
+            `None`, in which case this is the same as MHA
+        max_seq_len (int): maximum sequence length the model will be run with, as used
+            by :func:`~torchtune.modules.KVCache`
+        attn_dropout (float): dropout value passed onto scaled_dot_product_attention.
+            Default: 0.0
+        lora_rank (int): rank of each low-rank approximation
+        lora_alpha (float): scaling factor for the low-rank approximation
+        lora_dropout (float): LoRA dropout probability. Default: 0.0
+        quantize_base (bool): Whether to quantize base model parameters for linear layers
+            LoRA is being applied to. Default is ``False``.
+
+    Returns:
+        CausalSelfAttention: instantiation of self-attention module with LoRA
+        applied to a subset of Q, K, V, output projections.
+
+    Raises:
+        ValueError: If lora_modules arg is an empty list
+    """
+    if not lora_modules:
+        raise ValueError(
+            f"Must pass one or more of {LORA_ATTN_MODULES} as lora_modules"
+        )
+
+    head_dim = embed_dim // num_heads
+    num_kv_heads = num_kv_heads if num_kv_heads else num_heads
+    q_proj = (
+        InterleavedLoRALinear(
+            embed_dim,
+            num_heads * head_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            quantize_base=quantize_base,
+            bsz=bsz,
+        )
+        if "q_proj" in lora_modules
+        else nn.Linear(embed_dim, num_heads * head_dim, bias=False)
+    )
+    k_proj = (
+        InterleavedLoRALinear(
+            embed_dim,
+            num_kv_heads * head_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            quantize_base=quantize_base,
+            bsz=bsz,
+        )
+        if "k_proj" in lora_modules
+        else nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False)
+    )
+    v_proj = (
+        InterleavedLoRALinear(
+            embed_dim,
+            num_kv_heads * head_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            quantize_base=quantize_base,
+            bsz=bsz,
+        )
+        if "v_proj" in lora_modules
+        else nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False)
+    )
+    output_proj = (
+        InterleavedLoRALinear(
+            embed_dim,
+            embed_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            quantize_base=quantize_base,
+            bsz=bsz,
+        )
+        if "output_proj" in lora_modules
+        else nn.Linear(embed_dim, embed_dim, bias=False)
+    )
+    rope = RotaryPositionalEmbeddings(dim=head_dim, max_seq_len=max_seq_len, base=rope_base)
+    self_attn = CausalSelfAttention(
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        q_proj=q_proj,
+        k_proj=k_proj,
+        v_proj=v_proj,
+        output_proj=output_proj,
+        pos_embeddings=rope,
+        max_seq_len=max_seq_len,
+        attn_dropout=attn_dropout,
+        bsz=bsz,
+    )
+    return self_attn
+
 def async_lora_llama3(
     lora_attn_modules: List[LORA_ATTN_MODULES],
     apply_lora_to_mlp: bool = False,
@@ -531,43 +655,56 @@ def async_lora_llama3(
 
     """
 
-    head_dim = embed_dim // num_heads
-    num_kv_heads = num_kv_heads if num_kv_heads else num_heads
-    rope = RotaryPositionalEmbeddings(dim=head_dim, max_seq_len=max_seq_len, base=rope_base)
-    self_attn = CausalSelfAttention(
+    self_attn = async_lora_llama3_self_attention(
+        lora_modules=lora_attn_modules,
         embed_dim=embed_dim,
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        q_proj=nn.Linear(embed_dim, num_heads * head_dim, bias=False),
-        k_proj=nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False),
-        v_proj=nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False),
-        output_proj=nn.Linear(embed_dim, embed_dim, bias=False),
-        pos_embeddings=rope,
         max_seq_len=max_seq_len,
         attn_dropout=attn_dropout,
+        rope_base=rope_base,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        quantize_base=quantize_base,
+        bsz=bsz,
     )
+
     hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
-    mlp = llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)
-    layer = TransformerDecoderLayer(
+    if apply_lora_to_mlp:
+        mlp = async_lora_llama3_mlp(
+            dim=embed_dim,
+            hidden_dim=hidden_dim,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            quantize_base=quantize_base,
+            lora_dropout=lora_dropout,
+        )
+    else:
+        mlp = llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)
+
+    layer = LoraTransformerDecoderLayer(
         attn=self_attn,
         mlp=mlp,
         sa_norm=RMSNorm(dim=embed_dim, eps=norm_eps),
         mlp_norm=RMSNorm(dim=embed_dim, eps=norm_eps),
     )
+
     tok_embeddings = nn.Embedding(vocab_size, embed_dim)
-    output_proj = nn.Linear(embed_dim, vocab_size, bias=False)
 
-    lora = InterleavedLoRALinear(embed_dim, num_heads * head_dim,
-        rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)
-
-    return LoraTransformerDecoder(lora=lora, 
-            tok_embeddings=tok_embeddings,
-            layer=layer,
-            num_layers=num_layers,
-            max_seq_len=max_seq_len,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            norm=RMSNorm(embed_dim, eps=norm_eps),
-            output=output_proj
-        )
+    # TODO: quantize_base is not applied to final output_proj currently.
+    output_proj = (
+        InterleavedLoRALinear(embed_dim, vocab_size, rank=lora_rank, alpha=lora_alpha, dropout=lora_dropout)
+        if apply_lora_to_output
+        else nn.Linear(embed_dim, vocab_size, bias=False)
+    )
+    return LoraTransformerDecoder(
+        tok_embeddings=tok_embeddings,
+        layer=layer,
+        num_layers=num_layers,
+        max_seq_len=max_seq_len,
+        num_heads=num_heads,
+        head_dim=(embed_dim // num_heads),
+        norm=RMSNorm(embed_dim, eps=norm_eps),
+        output=output_proj,
+    )
