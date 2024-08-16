@@ -331,8 +331,9 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         lora_out = []
         num_adapters = len(self.rank)
         # print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
-        if x.shape[0] == self.bsz and num_adapters > 1:
+        if x.dim() == 3 and num_adapters > 1:
             x = x.repeat(num_adapters, 1, 1)
+            x = x.view(num_adapters, -1, x.shape[1], x.shape[2])
         print(f"Lora input dim after repeat is {x.shape}")
         after_dropout = self.dropout(x)
         bsz = x.shape[0] // num_adapters
@@ -347,7 +348,9 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
                 param.requires_grad = True
 
         for idx in range(num_adapters):
-            lora_a_slice = after_dropout[idx * bsz: (idx + 1) * bsz, :, :]
+            print(f"after dropout shape is {after_dropout.shape}")
+            lora_a_slice = after_dropout[idx, :, :, :]
+            print(f"lora a slice shape is {lora_a_slice.shape}")
             
             lora_after_a = getattr(self, f'lora_a_{activated}_{idx}')(lora_a_slice)
             lora_after_b = getattr(self, f'lora_b_{activated}_{idx}')(lora_after_a)
@@ -355,7 +358,7 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             scaled_results = (self.alpha[idx] / self.rank[idx]) * lora_after_b
 
             if out.shape[0] > self.bsz:
-                final_results = scaled_results + out[idx * bsz: (idx + 1) * bsz, :, :]
+                final_results = scaled_results + out[idx, :, :, :]
             else:
                 final_results = scaled_results + out
 
