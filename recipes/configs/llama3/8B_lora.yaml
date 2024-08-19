@@ -30,7 +30,7 @@ model:
   apply_lora_to_output: True
   lora_rank: [8, 8]
   lora_alpha: [16, 16]
-  bsz: 4
+  bsz: 2
 
 checkpointer:
   _component_: torchtune.utils.FullModelMetaCheckpointer
@@ -48,7 +48,7 @@ dataset:
   _component_: torchtune.datasets.hellaswag_dataset
 seed: null
 shuffle: True
-batch_size: 4
+batch_size: 2
 
 # Optimizer and Scheduler
 optimizer:

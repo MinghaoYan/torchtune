@@ -167,7 +167,7 @@ class CausalSelfAttention(nn.Module):
             - Make application of positional embeddings optional
         """
         # input has shape [b, s, d]
-        print(f"attention input shape is {x.shape}")
+        # print(f"attention input shape is {x.shape}")
         if x.dim() == 3:
             _, seq_len, _ = x.shape
         elif x.dim() == 4:
@@ -277,6 +277,6 @@ class CausalSelfAttention(nn.Module):
 
         # reshape the output to be the same shape as the input
         output = output.transpose(2, 3).contiguous().view(max_len, bsz, seq_len, -1)
-        print(f"attention output shape is {output.shape}")
+        # print(f"attention output shape is {output.shape}")
 
         return self.output_proj(output, activated)

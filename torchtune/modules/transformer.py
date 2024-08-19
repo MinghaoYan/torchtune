@@ -318,18 +318,18 @@ class LoraTransformerDecoderLayer(nn.Module):
         attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos, activated=activated)
 
         # Expand x for multiple LoRA adapters
-        print(f"before repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
+        # print(f"before repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
         if attn_out.shape[0] > x.shape[0]:
             repeat_factor = attn_out.shape[0] // x.shape[0]
             x = x.repeat(repeat_factor, 1, 1)
-        print(f"after repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
+        # print(f"after repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
 
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h), activated=activated)
 
-        print(f"mlp shape is {mlp_out.shape}")
+        # print(f"mlp shape is {mlp_out.shape}")
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + mlp_out
@@ -422,7 +422,7 @@ class LoraTransformerDecoder(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
-        activated: Optional[int] = None,
+        activated: Optional[int] = 0,
     ) -> Tensor:
         """
         Args:
@@ -480,10 +480,10 @@ class LoraTransformerDecoder(nn.Module):
         count = 0
         for layer in self.layers:
             # shape: [b, s, d]
-            print(f"layer {count} input shape is {h.shape}")
+            # print(f"layer {count} input shape is {h.shape}")
             h = layer(h, mask=mask, input_pos=input_pos, activated=activated)
 
-            print(f"layer {count} output shape is {h.shape}")
+            # print(f"layer {count} output shape is {h.shape}")
             count+= 1
         
         # shape: [b, s, d]
