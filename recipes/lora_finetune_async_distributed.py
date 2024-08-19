@@ -1046,13 +1046,14 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             
             loss = loss / self._gradient_accumulation_steps
 
-            print(f"do loss here {item.batch_idx}")
+            # print(f"do loss here {item.batch_idx}")
 
-            loss.backward()
+            # loss.backward()
 
             self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss, item.lora_idx))
-
-            print(f"end softmax batch {item.batch_idx}")
+            
+            if self._is_rank_zero:
+                print(f"end softmax batch {item.batch_idx}")
     
 
     def cleanup(self) -> None:
