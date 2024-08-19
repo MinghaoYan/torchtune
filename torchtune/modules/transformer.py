@@ -324,7 +324,7 @@ class LoraTransformerDecoderLayer(nn.Module):
             x = x.repeat(repeat_factor, 1, 1)
         # print(f"after repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
-        h = attn_out + x
+        h = attn_out.contiguous() + x
 
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h), activated=activated)
@@ -332,7 +332,7 @@ class LoraTransformerDecoderLayer(nn.Module):
         # print(f"mlp shape is {mlp_out.shape}")
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
-        out = h + mlp_out
+        out = h.contiguous() + mlp_out
         return out
 
 

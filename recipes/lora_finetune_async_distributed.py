@@ -870,11 +870,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         # in case shuffle is True
         self._sampler.set_epoch(curr_epoch)
         
+        self.processed_batches = [0, 0]
 
         self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 0))
-        self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 0))
-        self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 1))
-        self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
+        # self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 0))
+        # self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 1))
+        # self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
 
         tasks = set()
         priority_map = {'fwd': 1, 'softmax': 2, 'bwd': 3}
@@ -1003,20 +1004,20 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             if self._is_rank_zero:
                 print(f"start bwd batch {item.batch_idx}")
             self.bwd_queue.get()
-            item.input.backward()
+            # item.input.backward()
 
             # Step with optimizer
             if (item.batch_idx + 1) % self._gradient_accumulation_steps == 0:
-                self._optimizer.step()
-                self._optimizer.zero_grad(set_to_none=True)
-                self._lr_scheduler.step()
+                getattr(self, f"_optimizer{item.lora_idx+1}").step()
+                getattr(self, f"_optimizer{item.lora_idx+1}").zero_grad(set_to_none=True)
+                getattr(self, f"_lr_scheduler{item.lora_idx+1}").step()
 
                 # Update the number of steps when the weights are updated
                 self.global_step += 1
             
-            processed_batches[item.lora_idx] += 1
+            self.processed_batches[item.lora_idx] += 1
             # Get new input
-            if processed_batches[item.lora_idx] < self.num_batches * (self.total_epochs - self.epochs_run):
+            if self.processed_batches[item.lora_idx] < self.num_batches * (self.total_epochs - self.epochs_run):
                 self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
             if self._is_rank_zero:
                 print(f"end bwd batch {item.batch_idx}")
@@ -1027,15 +1028,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self.softmax_queue.get()
             
             logits = item.input[:, :, :-1, :]
-            logits = logits.reshape(-1, logits.size(2), logits.size(3)).contiguous()
+            logits = logits.reshape(-1, logits.size(2), logits.size(3))
             labels = item.labels[..., 1:].contiguous()
-            logits = logits.transpose(1, 2)
+            logits = logits.transpose(1, 2).contiguous()
             
-            if self._is_rank_zero:
-                print(f"label shape {labels.shape}, logits shape {logits.shape}")
             labels = labels.repeat(self.num_adapters, 1)
-            if self._is_rank_zero:
-                print(f"after repeat label shape {labels.shape}, logits shape {logits.shape}")
+            
             # Compute loss
             loss = self._loss_fn(logits, labels)
             if self._is_rank_zero:
@@ -1048,8 +1046,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
             # print(f"do loss here {item.batch_idx}")
 
-            # loss.backward()
-
+            loss.backward(retain_graph=True)
             self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss, item.lora_idx))
             
             if self._is_rank_zero:
