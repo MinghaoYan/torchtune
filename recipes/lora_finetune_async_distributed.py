@@ -873,7 +873,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.processed_batches = [0, 0]
 
         self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 0))
-        # self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 0))
+        self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 0))
         # self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 1))
         # self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
 
@@ -996,7 +996,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self.fwd_queue.get()
             tokens, mask, input_pos, labels = self.retrieve_data(item.batch_idx)
             logits = self._model(tokens, mask=mask, input_pos=input_pos, activated=item.lora_idx)
-            self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", logits, item.lora_idx, labels=labels))
+            # self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", logits, item.lora_idx, labels=labels))
+            self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
             if self._is_rank_zero:
                 print(f"end fwd batch {item.batch_idx}")
         
