@@ -996,8 +996,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self.fwd_queue.get()
             tokens, mask, input_pos, labels = self.retrieve_data(item.batch_idx)
             logits = self._model(tokens, mask=mask, input_pos=input_pos, activated=item.lora_idx)
-            # self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", logits, item.lora_idx, labels=labels))
-            self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
+            self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", logits, item.lora_idx, labels=labels))
+            # self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
             if self._is_rank_zero:
                 print(f"end fwd batch {item.batch_idx}")
         
@@ -1047,8 +1047,9 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
             # print(f"do loss here {item.batch_idx}")
 
-            loss.backward(retain_graph=True)
-            self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss, item.lora_idx))
+            # loss.backward(retain_graph=True)
+            # self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss, item.lora_idx))
+            self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
             
             if self._is_rank_zero:
                 print(f"end softmax batch {item.batch_idx}")

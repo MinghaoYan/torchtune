@@ -130,7 +130,7 @@ class CausalSelfAttention(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
-        activated: Optional[int] = None,
+        activated: Optional[List[int]] = None,
     ) -> Tensor:
         """
         Args:

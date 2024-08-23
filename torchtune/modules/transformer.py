@@ -10,6 +10,7 @@ import torch
 from torch import nn, Tensor
 
 from torchtune.modules import CausalSelfAttention, KVCache
+from torch.utils.checkpoint import checkpoint
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -254,6 +255,11 @@ class TransformerDecoder(nn.Module):
 
 
 ####################### Lora Transformer Decoder ##############################
+def _attn_wrapper(attn_module, x, mask, input_pos, activated):
+    return attn_module(x, mask=mask, input_pos=input_pos, activated=activated)
+
+def _mlp_wrapper(mlp_module, x, activated):
+    return mlp_module(x, activated=activated)
 
 class LoraTransformerDecoderLayer(nn.Module):
     """Transformer layer derived from the Llama2 model. Normalization is applied before the attention **and** FF layer.
@@ -313,9 +319,12 @@ class LoraTransformerDecoderLayer(nn.Module):
         # [b, s, d]
         # Norm applied before self-attention
         # print(f"Decoder layer input shape is {x.shape}")
-        # norm_x = self.sa_norm(x)
-        # print(f"Decoder layer norm x input shape is {x.shape}")
-        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos, activated=activated)
+        norm_x = self.sa_norm(x)
+        # attn_out = self.attn(norm_x, mask=mask, input_pos=input_pos, activated=activated)
+
+        # Using checkpoint directly with self.attn
+        attn_out = checkpoint(_attn_wrapper, self.attn, norm_x, mask, input_pos, activated)
+
 
         # Expand x for multiple LoRA adapters
         # print(f"before repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
@@ -326,8 +335,9 @@ class LoraTransformerDecoderLayer(nn.Module):
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out.contiguous() + x
 
+        mlp_norm = self.mlp_norm(h)
         # Norm applied before the feedforward layer
-        mlp_out = self.mlp(self.mlp_norm(h), activated=activated)
+        mlp_out = checkpoint(_mlp_wrapper, self.mlp, mlp_norm, activated)
 
         # print(f"mlp shape is {mlp_out.shape}")
 
