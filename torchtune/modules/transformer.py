@@ -393,6 +393,7 @@ class LoraTransformerDecoder(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.causal_mask = None
+        self.gather_handles = []
 
     def setup_caches(self, batch_size: int, dtype: torch.dtype) -> None:
         """Setup key value caches for attention calculation.
@@ -502,3 +503,75 @@ class LoraTransformerDecoder(nn.Module):
         # shape: [b, s, out_dim] - out_dim is usually the vocab size
         output = self.output(h).float()
         return output
+
+    def wait_for_all_gather(self):
+        for handle in self.gather_handles:
+            handle.wait()
+        self.gather_handles = []
+
+
+
+def all_gather_next_layer_hook(module, input):
+    """
+    Hook that initiates AllGather for the next layer's weights during the forward pass.
+    """
+    fsdp_model = module.fsdp_model
+    current_layer_index = module.layer_index
+
+    if current_layer_index < len(fsdp_model.module.layers) - 1:
+        next_layer = fsdp_model.module.layers[current_layer_index + 1]
+        handles = []
+        for param in next_layer.parameters():
+            if hasattr(param, "_local_shard"):
+                handle = dist.all_gather(
+                    tensors=[torch.zeros_like(param.data) for _ in range(dist.get_world_size())],
+                    tensor=param.data,
+                    async_op=True
+                )
+                handles.append(handle)
+        fsdp_model.module.gather_handles = handles
+
+
+def custom_comm_hook(state, bucket):
+    """
+    Custom communication hook to initiate AllGather of weights for the next layer
+    during the backward pass computation of the current layer.
+    """
+    fsdp_module = state.fsdp_module
+    current_layer_index = state.current_layer_index
+
+    # Initiate AllGather for the next layer's weights if we are not at the last layer
+    if current_layer_index > 0:  # Because we go backward, next layer in backprop is the previous index
+        next_layer = fsdp_module.module.layers[current_layer_index - 1]
+        handles = []
+        for param in next_layer.parameters():
+            if hasattr(param, "_local_shard"):
+                handle = dist.all_gather(
+                    tensors=[torch.zeros_like(param.data) for _ in range(dist.get_world_size())],
+                    tensor=param.data,
+                    async_op=True
+                )
+                handles.append(handle)
+        fsdp_module.module.gather_handles = handles
+
+    # Proceed with the default reduce-scatter
+    future = dist.reduce_scatter(tensor=torch.zeros_like(bucket), scatter_list=bucket.chunk(dist.get_world_size()), async_op=True)
+    
+    return future
+
+
+def setup_hooks(fsdp_model):
+    """
+    Sets up custom communication hooks on the FSDP model.
+    """
+    # Store a reference to the fsdp model in the state
+    state = type('', (), {})()  # Create a simple object to store state
+    state.fsdp_module = fsdp_model
+    state.current_layer_index = len(fsdp_model.module.layers)  # Start from the last layer
+    
+    # Register the custom communication hook
+    fsdp_model.register_comm_hook(state=state, hook=custom_comm_hook)
+    
+    # Register pre-backward hooks to update the current layer index during backward pass
+    for layer_index, layer in enumerate(fsdp_model.module.layers):
+        layer.register_forward_pre_hook(lambda module, input: setattr(state, 'current_layer_index', layer_index))
