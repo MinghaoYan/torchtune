@@ -169,6 +169,10 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.bwd_queue = Queue()
         self.softmax_queue = Queue()
 
+        self.stream1 = torch.cuda.Stream()
+        self.stream2 = torch.cuda.Stream()
+
+
         # self.num_layers = num_layers
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
@@ -890,10 +894,10 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
             if len(sorted_list) > 0:
                 if len(tasks) < 2:
-                    tasks.add(asyncio.create_task(self.safe_dispatch_iteration(sorted_list[0])))
+                    tasks.add(asyncio.create_task(self.dispatch_with_stream(sorted_list[0], self.stream1)))
 
                 if len(sorted_list) > 1 and len(tasks) < 2:
-                    tasks.add(asyncio.create_task(self.safe_dispatch_iteration(sorted_list[1])))
+                    tasks.add(asyncio.create_task(self.dispatch_with_stream(sorted_list[1], self.stream2)))
 
             if tasks:
                 # Wait for the first completed task
@@ -988,6 +992,11 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             loss = loss / self._gradient_accumulation_steps
             
             self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss))
+
+    async def dispatch_with_stream(self, task, stream):
+        with torch.cuda.stream(stream):
+            # Assuming safe_dispatch_iteration runs the model forward/backward pass
+            await self.safe_dispatch_iteration(task)
 
     async def dispatch_iteration(self, item):
         if item.source == "fwd":
