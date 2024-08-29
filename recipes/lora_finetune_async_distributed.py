@@ -433,12 +433,43 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         fsdp_module = state.fsdp_module
         current_layer_index = state.current_layer_index
 
+         # Ensure the output tensor is of the correct size and type
+        output = torch.zeros(bucket.size(0) // dist.get_world_size(), device=bucket.device, dtype=bucket.dtype)
+
+        # Ensure input tensors are all of the same type as the output
+        input_list = [tensor.to(dtype=bucket.dtype) for tensor in bucket.chunk(dist.get_world_size())]
+
+        # # Debugging: Check process_group and tensor shapes
+        # print(f"Rank {dist.get_rank()}: process_group type: {type(process_group)}")
+        # print(f"Rank {dist.get_rank()}: process_group: {process_group}")
+        # print(f"Rank {dist.get_rank()}: Output tensor shape: {output.shape}, device: {output.device}")
+        # for idx, tensor in enumerate(input_list):
+        #     print(f"Rank {dist.get_rank()}: Input tensor {idx} shape: {tensor.shape}, device: {tensor.device}")
+
+        if not isinstance(process_group, dist.ProcessGroup):
+            process_group = dist.group.WORLD
+
+        try:
+            torch.cuda.synchronize()  # Ensure all prior CUDA work is complete
+            future = dist.reduce_scatter(
+                output,
+                input_list=input_list,
+                group=process_group,
+                async_op=True
+            )
+        except RuntimeError as e:
+            print(f"Rank {dist.get_rank()}: Error during reduce_scatter: {e}")
+            torch.cuda.synchronize()
+            raise e
+
         # Initiate AllGather for the next layer's weights if we are not at the last layer
         if current_layer_index > 0:  # Because we go backward, next layer in backprop is the previous index
+            # print(f"current_layer_index is {current_layer_index}")
             next_layer = fsdp_module.module.layers[current_layer_index - 1]
             handles = []
             for param in next_layer.parameters():
                 if hasattr(param, "_local_shard"):
+                    # print(f"param is {param}")
                     gathered_tensors = [torch.zeros_like(param.data) for _ in range(dist.get_world_size())]
                     handle = dist.all_gather(
                         gathered_tensors,
@@ -447,9 +478,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     )
                     handles.append(handle)
             fsdp_module.module.gather_handles = handles
-
-        # Proceed with the default reduce-scatter
-        future = dist.reduce_scatter(torch.zeros_like(bucket), input_list=list(bucket.chunk(dist.get_world_size())), async_op=True)
         
         return future
 
