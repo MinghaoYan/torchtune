@@ -883,11 +883,11 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 labels = labels[..., 1:].contiguous()
                 logits = logits.transpose(1, 2)
                 
-                if self._is_rank_zero:
-                    print(f"label shape {labels.shape}, logits shape {logits.shape}")
+                # if self._is_rank_zero:
+                #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
                 labels = labels.repeat(self.num_adapters, 1)
-                if self._is_rank_zero:
-                    print(f"label shape {labels.shape}, logits shape {logits.shape}")
+                # if self._is_rank_zero:
+                #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
                 # Compute loss
                 loss = self._loss_fn(logits, labels)
                 # free logits otherwise it peaks backward memory
