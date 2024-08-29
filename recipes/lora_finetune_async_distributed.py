@@ -46,7 +46,7 @@ import asyncio
 
 import math
 
-# import logging
+import torch.distributed as dist
 
 log = utils.get_logger("DEBUG")
 
@@ -168,6 +168,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self.fwd_queue = Queue()
         self.bwd_queue = Queue()
         self.softmax_queue = Queue()
+
+        self.gather_handles = []
 
         # self.num_layers = num_layers
 
@@ -402,6 +404,81 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         return profiler
 
+    def all_gather_next_layer_hook(self, module, input):
+        """
+        Hook that initiates AllGather for the next layer's weights during the forward pass.
+        """
+        fsdp_model = module.fsdp_model
+        current_layer_index = module.layer_index
+
+        if current_layer_index < len(fsdp_model.module.layers) - 1:
+            next_layer = fsdp_model.module.layers[current_layer_index + 1]
+            handles = []
+            for param in next_layer.parameters():
+                if hasattr(param, "_local_shard"):
+                    handle = dist.all_gather(
+                        tensors=[torch.zeros_like(param.data) for _ in range(dist.get_world_size())],
+                        tensor=param.data,
+                        async_op=True
+                    )
+                    handles.append(handle)
+            fsdp_model.module.gather_handles = handles
+
+    @staticmethod
+    def custom_comm_hook(state, bucket, process_group=None):
+        """
+        Custom communication hook to initiate AllGather of weights for the next layer
+        during the backward pass computation of the current layer.
+        """
+        fsdp_module = state.fsdp_module
+        current_layer_index = state.current_layer_index
+
+        # Initiate AllGather for the next layer's weights if we are not at the last layer
+        if current_layer_index > 0:  # Because we go backward, next layer in backprop is the previous index
+            next_layer = fsdp_module.module.layers[current_layer_index - 1]
+            handles = []
+            for param in next_layer.parameters():
+                if hasattr(param, "_local_shard"):
+                    gathered_tensors = [torch.zeros_like(param.data) for _ in range(dist.get_world_size())]
+                    handle = dist.all_gather(
+                        gathered_tensors,
+                        param.data,
+                        async_op=True
+                    )
+                    handles.append(handle)
+            fsdp_module.module.gather_handles = handles
+
+        # Proceed with the default reduce-scatter
+        future = dist.reduce_scatter(torch.zeros_like(bucket), input_list=list(bucket.chunk(dist.get_world_size())), async_op=True)
+        
+        return future
+
+
+    def setup_hooks(self, fsdp_model):
+        """
+        Sets up custom communication hooks on the FSDP model.
+        """
+        # Store a reference to the fsdp model in the state
+        state = type('', (), {})()  # Create a simple object to store state
+        state.fsdp_module = fsdp_model
+        state.current_layer_index = len(fsdp_model.module.layers)  # Start from the last layer
+        
+        # Register the custom communication hook
+        fsdp_model.register_comm_hook(state=state, hook=self.custom_comm_hook)
+        
+        # Register pre-backward hooks to update the current layer index during backward pass
+        for layer_index, layer in enumerate(fsdp_model.module.layers):
+            def update_layer_index(module, input, layer_index=layer_index, state=state):
+                setattr(state, 'current_layer_index', layer_index)
+                
+            layer.register_forward_pre_hook(update_layer_index)
+
+
+    def wait_for_all_gather(self):
+        for handle in self.gather_handles:
+            handle.wait()
+        self.gather_handles = []
+
     def _setup_model(
         self,
         cfg_model: DictConfig,
@@ -509,6 +586,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         # Ensure no params and buffers are on meta device
         utils.validate_no_params_on_meta_device(model)
+
+        self.setup_hooks(model)
 
         if enable_activation_checkpointing:
             utils.set_activation_checkpointing(
@@ -1082,8 +1161,8 @@ def recipe_main(cfg: DictConfig) -> None:
 
     recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
-    # recipe.train()
-    asyncio.run(recipe.train_by_step())
+    recipe.train()
+    # asyncio.run(recipe.train_by_step())
     recipe.cleanup()
 
 
