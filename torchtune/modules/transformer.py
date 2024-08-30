@@ -261,6 +261,9 @@ def _attn_wrapper(attn_module, x, mask, input_pos, activated):
 def _mlp_wrapper(mlp_module, x, activated):
     return mlp_module(x, activated=activated)
 
+def _layer_wrapper(layer_module, x, mask, input_pos, activated):
+    return layer_module(x, mask=mask, input_pos=input_pos, activated=activated)
+
 class LoraTransformerDecoderLayer(nn.Module):
     """Transformer layer derived from the Llama2 model. Normalization is applied before the attention **and** FF layer.
 
@@ -323,13 +326,14 @@ class LoraTransformerDecoderLayer(nn.Module):
         # attn_out = self.attn(norm_x, mask=mask, input_pos=input_pos, activated=activated)
 
         # Using checkpoint directly with self.attn
+        # attn_out = self.attn(norm_x, mask=mask, input_pos=input_pos, activated=activated)
         attn_out = checkpoint(_attn_wrapper, self.attn, norm_x, mask, input_pos, activated)
 
 
         # Expand x for multiple LoRA adapters
         # print(f"before repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
-        if attn_out.shape[1] > x.shape[0]:
-            repeat_factor = attn_out.shape[1] // x.shape[0]
+        if attn_out.shape[-3] > x.shape[-3]:
+            repeat_factor = attn_out.shape[-3] // x.shape[-3]
             x = x.repeat(repeat_factor, 1, 1)
         # print(f"after repeat attn shape is {attn_out.shape}, input shape is {x.shape}")
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
@@ -337,6 +341,7 @@ class LoraTransformerDecoderLayer(nn.Module):
 
         mlp_norm = self.mlp_norm(h)
         # Norm applied before the feedforward layer
+        # mlp_out = self.mlp(mlp_norm, activated=activated)
         mlp_out = checkpoint(_mlp_wrapper, self.mlp, mlp_norm, activated)
 
         # print(f"mlp shape is {mlp_out.shape}")
@@ -492,6 +497,7 @@ class LoraTransformerDecoder(nn.Module):
             # shape: [b, s, d]
             # print(f"layer {count} input shape is {h.shape}")
             h = layer(h, mask=mask, input_pos=input_pos, activated=activated)
+            # h = checkpoint(_layer_wrapper, layer, h, mask, input_pos, activated)
 
             # print(f"layer {count} output shape is {h.shape}")
             count+= 1

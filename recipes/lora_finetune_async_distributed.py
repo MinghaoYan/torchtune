@@ -22,6 +22,7 @@ from torch.distributed.fsdp import (
     FullStateDictConfig,
     FullyShardedDataParallel as FSDP,
     StateDictType,
+    MixedPrecision,
 )
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
@@ -591,6 +592,14 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         #     if v.requires_grad:
         #         print(k)
 
+        # Define a mixed precision configuration
+        mixed_precision = MixedPrecision(
+            param_dtype=torch.float16,   # Use FP16 for parameters
+            reduce_dtype=torch.float16,  # Use FP16 for gradient reduction
+            buffer_dtype=torch.float16   # Use FP16 for buffers
+        )
+
+
         model = FSDP(
             module=model,
             auto_wrap_policy=utils.lora_fsdp_wrap_policy(
@@ -599,7 +608,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             sharding_strategy=torch.distributed.fsdp.ShardingStrategy.FULL_SHARD,
             device_id=self._device,
             # this recipe does not currently support mixed precision training
-            mixed_precision=None,
+            mixed_precision=mixed_precision,
             # Ensure we broadcast params and buffers from rank 0
             sync_module_states=True,
             # Initialize empty modules on all non-zero ranks
@@ -610,12 +619,15 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 if not self._is_rank_zero
                 else None
             ),
+            backward_prefetch=torch.distributed.fsdp.BackwardPrefetch.BACKWARD_POST, #alternative: backward_pre
+            forward_prefetch=True,
+            use_orig_params=True,
         )
 
         # Ensure no params and buffers are on meta device
         utils.validate_no_params_on_meta_device(model)
 
-        self.setup_hooks(model)
+        # self.setup_hooks(model)
 
         if enable_activation_checkpointing:
             utils.set_activation_checkpointing(
@@ -829,7 +841,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         _, rank = utils.get_world_size_and_rank()
 
         # zero out the gradients before starting training
-        self._optimizer1.zero_grad()
+        self._optimizer1.zero_grad(set_to_none=True)
         # self._optimizer2.zero_grad()
 
         # Initialize tokens count and running loss (for grad accumulation)
@@ -838,6 +850,9 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         num_tokens = 0
 
         self._profiler.start()
+
+        if self._is_rank_zero:
+            self.print_memory_usage()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
 
@@ -869,7 +884,16 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     input_pos.to(self._device) if input_pos is not None else None
                 )
 
+                if self._is_rank_zero:
+                    print("Finished processing inputs, now ready for forward pass")
+                    self.print_memory_usage()
                 logits = self._model(tokens, mask=mask, input_pos=input_pos)
+
+                # self._model._free_full_params()  
+
+                if self._is_rank_zero:
+                    print("Finished forward pass")
+                    self.print_memory_usage()
                 # Shift so that tokens < n predict n
                 # logits = logits[..., :-1, :].contiguous()
                 # labels = labels[..., 1:].contiguous()
@@ -888,6 +912,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 labels = labels.repeat(self.num_adapters, 1)
                 # if self._is_rank_zero:
                 #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
+                torch.cuda.empty_cache()
+                if self._is_rank_zero:
+                    print("Finished processing logits")
+                    self.print_memory_usage()
+                # print(torch.cuda.memory_summary())
+
                 # Compute loss
                 loss = self._loss_fn(logits, labels)
                 # free logits otherwise it peaks backward memory
@@ -921,7 +951,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                         time_per_step = time.perf_counter() - t0
                         log_dict = {
                             "loss": loss_to_log,
-                            "lr": self._optimizer.param_groups[0]["lr"],
+                            "lr": self._optimizer1.param_groups[0]["lr"],
                             "tokens_per_second_per_gpu": num_tokens / time_per_step,
                         }
                         if self._log_peak_memory_stats:
@@ -945,6 +975,16 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             self.save_checkpoint(epoch=curr_epoch)
 
         self._profiler.stop()
+
+    def print_memory_usage(self):
+        """
+        Utility function to print memory usage for the current device.
+        """
+        print(f"Memory Allocated: {torch.cuda.memory_allocated() / (1024 ** 3):.2f} GB")
+        print(f"Max Memory Allocated: {torch.cuda.max_memory_allocated() / (1024 ** 3):.2f} GB")
+        print(f"Memory Reserved: {torch.cuda.memory_reserved() / (1024 ** 3):.2f} GB")
+        print(f"Max Memory Reserved: {torch.cuda.max_memory_reserved() / (1024 ** 3):.2f} GB")
+
 
     def peek_queue(self, q):
         if not q.queue:

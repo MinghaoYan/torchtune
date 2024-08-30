@@ -336,13 +336,13 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         bsz = x.shape[0] // num_adapters
 
         # Disable gradients for inactive LoRA parameters
-        for idx in range(num_adapters):
-            lora_a_active = getattr(self, f'lora_a_{activated}_{idx}')
-            lora_b_active = getattr(self, f'lora_b_{activated}_{idx}')
-            for param in lora_a_active.parameters():
-                param.requires_grad = True
-            for param in lora_b_active.parameters():
-                param.requires_grad = True
+        # for idx in range(num_adapters):
+        #     lora_a_active = getattr(self, f'lora_a_{activated}_{idx}')
+        #     lora_b_active = getattr(self, f'lora_b_{activated}_{idx}')
+        #     for param in lora_a_active.parameters():
+        #         param.requires_grad = True
+        #     for param in lora_b_active.parameters():
+        #         param.requires_grad = True
 
         for idx in range(num_adapters):
             # print(f"after dropout shape is {after_dropout.shape}")
@@ -364,13 +364,13 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             lora_out.append(final_results)
         
         # Disable gradients for inactive LoRA parameters
-        for idx in range(num_adapters):
-            lora_a_inactive = getattr(self, f'lora_a_{1-activated}_{idx}')
-            lora_b_inactive = getattr(self, f'lora_b_{1-activated}_{idx}')
-            for param in lora_a_inactive.parameters():
-                param.requires_grad = False
-            for param in lora_b_inactive.parameters():
-                param.requires_grad = False
+        # for idx in range(num_adapters):
+        #     lora_a_inactive = getattr(self, f'lora_a_{1-activated}_{idx}')
+        #     lora_b_inactive = getattr(self, f'lora_b_{1-activated}_{idx}')
+        #     for param in lora_a_inactive.parameters():
+        #         param.requires_grad = False
+        #     for param in lora_b_inactive.parameters():
+        #         param.requires_grad = False
         
         if lora_out[0].dim() == 3:
             total_out = torch.stack(lora_out, dim=0)
