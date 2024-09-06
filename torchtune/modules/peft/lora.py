@@ -227,6 +227,8 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         use_bias: bool = False,
         quantize_base: bool = False,
         bsz: int = 1,
+        device_rank: int = 0,
+        world_size: int = 1,
     ):
         super().__init__()
         self.in_dim = in_dim
@@ -246,13 +248,17 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             "bias", nn.Parameter(bias) if bias is not None else None
         )
         self.dropout = nn.Dropout(p=dropout)
-        # self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
-        # self.lora_b = nn.Linear(in_features=rank, out_features=out_dim, bias=False)
-        for idx in range(len(self.rank)):
-            setattr(self, f'lora_a_0_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
-            setattr(self, f'lora_b_0_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
-            setattr(self, f'lora_a_1_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
-            setattr(self, f'lora_b_1_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
+        self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
+        self.lora_b = nn.Linear(in_features=sum(self.rank), out_features=out_dim, bias=False)
+
+        self.device_rank = device_rank
+        self.world_size = world_size
+        assert(len(self.rank) // world_size == 0, "Must evenly divide num lora adapters and world size")
+        # for idx in range(len(self.rank)):
+        #     setattr(self, f'lora_a_0_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
+        #     setattr(self, f'lora_b_0_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
+        #     setattr(self, f'lora_a_1_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
+        #     setattr(self, f'lora_b_1_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
 
         self.merged = False
         # Note: FSDP's meta device initialization contract assumes that a module's
@@ -268,12 +274,13 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
     def initialize_parameters(self):
         # Initialize as in
         # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
-        # _lora_a_init_params(self.lora_a)
-        for idx in range(len(self.rank)):
-            _lora_a_init_params(getattr(self, f"lora_a_0_{idx}"))
-            _lora_b_init_params(getattr(self, f"lora_b_0_{idx}"))
-            _lora_a_init_params(getattr(self, f"lora_a_1_{idx}"))
-            _lora_b_init_params(getattr(self, f"lora_b_1_{idx}"))
+        _lora_a_init_params(self.lora_a)
+        _lora_b_init_params(self.lora_b)
+        # for idx in range(len(self.rank)):
+        #     _lora_a_init_params(getattr(self, f"lora_a_0_{idx}"))
+        #     _lora_b_init_params(getattr(self, f"lora_b_0_{idx}"))
+        #     _lora_a_init_params(getattr(self, f"lora_a_1_{idx}"))
+        #     _lora_b_init_params(getattr(self, f"lora_b_1_{idx}"))
 
 
     def _create_weight_and_bias(self):
@@ -300,12 +307,12 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         """
         # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
         # in this module change.
-        adapter_params = []
-        for idx in range(len(self.rank)):
-            adapter_params.append(f"lora_a_0_{idx}.weight")
-            adapter_params.append(f"lora_b_0_{idx}.weight")
-            adapter_params.append(f"lora_a_1_{idx}.weight")
-            adapter_params.append(f"lora_b_1_{idx}.weight")
+        adapter_params = ["lora_a.weight", "lora_b.weight"]
+        # for idx in range(len(self.rank)):
+        #     adapter_params.append(f"lora_a_0_{idx}.weight")
+        #     adapter_params.append(f"lora_b_0_{idx}.weight")
+        #     adapter_params.append(f"lora_a_1_{idx}.weight")
+        #     adapter_params.append(f"lora_b_1_{idx}.weight")
         return adapter_params
 
     def forward(self, x: Tensor, activated: int = 0) -> Tensor:
@@ -324,60 +331,6 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         if self.disabled:
             return out
 
-        # print(f"Lora input dim is {x.shape}")
-        lora_out = []
-        num_adapters = len(self.rank)
-        # print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
-        if x.dim() == 3 and num_adapters > 1:
-            x = x.repeat(num_adapters, 1, 1)
-            x = x.view(num_adapters, -1, x.shape[1], x.shape[2])
-        # print(f"Lora input dim after repeat is {x.shape}")
-        after_dropout = self.dropout(x)
-        bsz = x.shape[0] // num_adapters
-
-        # Disable gradients for inactive LoRA parameters
-        # for idx in range(num_adapters):
-        #     lora_a_active = getattr(self, f'lora_a_{activated}_{idx}')
-        #     lora_b_active = getattr(self, f'lora_b_{activated}_{idx}')
-        #     for param in lora_a_active.parameters():
-        #         param.requires_grad = True
-        #     for param in lora_b_active.parameters():
-        #         param.requires_grad = True
-
-        for idx in range(num_adapters):
-            # print(f"after dropout shape is {after_dropout.shape}")
-            if after_dropout.dim() == 4:
-                lora_a_slice = after_dropout[idx, :, :, :]
-            elif after_dropout.dim() == 3:
-                lora_a_slice = after_dropout
-            # print(f"lora a slice shape is {lora_a_slice.shape}")
-            
-            lora_after_a = getattr(self, f'lora_a_{activated}_{idx}')(lora_a_slice)
-            lora_after_b = getattr(self, f'lora_b_{activated}_{idx}')(lora_after_a)
-
-            scaled_results = (self.alpha[idx] / self.rank[idx]) * lora_after_b
-
-            if out.dim() == 4:
-                final_results = scaled_results + out[idx, :, :, :]
-            elif out.dim() == 3:
-                final_results = scaled_results + out
-
-            # print(f"final_results shape is {final_results.shape}")
-
-            lora_out.append(final_results)
-        
-        # Disable gradients for inactive LoRA parameters
-        # for idx in range(num_adapters):
-        #     lora_a_inactive = getattr(self, f'lora_a_{1-activated}_{idx}')
-        #     lora_b_inactive = getattr(self, f'lora_b_{1-activated}_{idx}')
-        #     for param in lora_a_inactive.parameters():
-        #         param.requires_grad = False
-        #     for param in lora_b_inactive.parameters():
-        #         param.requires_grad = False
-        
-        if lora_out[0].dim() == 3:
-            total_out = torch.stack(lora_out, dim=0)
-        elif lora_out[0].dim() == 4:
-            total_out = torch.cat(lora_out, dim=0)
-        # print(f"lora out len is {len(lora_out)} total out shape is {total_out.shape}")
-        return total_out
+        lora_out = self.lora_a(self.dropout(x) * self.mask_a)
+        lora_out = (self.alpha / self.rank) * self.lora_b(lora_out * self.mask_b)
+        return out + lora_out
