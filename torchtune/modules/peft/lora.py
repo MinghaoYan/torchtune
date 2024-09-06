@@ -346,7 +346,10 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
 
         for idx in range(num_adapters):
             # print(f"after dropout shape is {after_dropout.shape}")
-            lora_a_slice = after_dropout[idx, :, :, :]
+            if after_dropout.dim() == 4:
+                lora_a_slice = after_dropout[idx, :, :, :]
+            elif after_dropout.dim() == 3:
+                lora_a_slice = after_dropout
             # print(f"lora a slice shape is {lora_a_slice.shape}")
             
             lora_after_a = getattr(self, f'lora_a_{activated}_{idx}')(lora_a_slice)

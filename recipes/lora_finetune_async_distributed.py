@@ -1044,7 +1044,11 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
             if tasks:
                 # Wait for the first completed task
-                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                # done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for done_task in asyncio.as_completed(tasks):
+                    await done_task
+                    tasks.remove(done_task)
+
 
     def retrieve_data(self, batch_idx):
         # Calculate the start and end indices for the batch
