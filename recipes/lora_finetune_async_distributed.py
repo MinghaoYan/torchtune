@@ -264,22 +264,22 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         )
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
-        self._optimizer1 = self._setup_optimizer_async(
-            cfg_optimizer=cfg.optimizer,
-            idx = 0
-        )
-
-        self._optimizer2 = self._setup_optimizer_async(
-            cfg_optimizer=cfg.optimizer,
-            idx = 1
-        )
-
-        # self._optimizer = self._setup_optimizer(
+        # self._optimizer1 = self._setup_optimizer_async(
         #     cfg_optimizer=cfg.optimizer,
-        #     opt_state_dict=checkpoint_dict[utils.OPT_KEY]
-        #     if self._resume_from_checkpoint
-        #     else None,
+        #     idx = 0
         # )
+
+        # self._optimizer2 = self._setup_optimizer_async(
+        #     cfg_optimizer=cfg.optimizer,
+        #     idx = 1
+        # )
+
+        self._optimizer1 = self._setup_optimizer(
+            cfg_optimizer=cfg.optimizer,
+            opt_state_dict=checkpoint_dict[utils.OPT_KEY]
+            if self._resume_from_checkpoint
+            else None,
+        )
 
         self._loss_fn = config.instantiate(cfg.loss)
 
@@ -334,12 +334,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             optimizer=self._optimizer1,
         )
 
-        self._lr_scheduler2 = self._setup_lr_scheduler_async(
-            cfg_lr_scheduler=cfg.lr_scheduler,
-            num_training_steps=self.total_epochs * self._steps_per_epoch,
-            last_epoch=self.global_step - 1,
-            optimizer=self._optimizer2,
-        )
+        # self._lr_scheduler2 = self._setup_lr_scheduler_async(
+        #     cfg_lr_scheduler=cfg.lr_scheduler,
+        #     num_training_steps=self.total_epochs * self._steps_per_epoch,
+        #     last_epoch=self.global_step - 1,
+        #     optimizer=self._optimizer2,
+        # )
 
         # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
         # if cfg is missing profiler key or if `cfg.profiler.enabled = False`
@@ -663,7 +663,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         self, cfg_optimizer: DictConfig, idx: int
     ) -> Optimizer:
         # This is inefficient since there is not need to instantiate the optimizer with all params as based model params are frozen.
-        active_params = [param for name, param in self._model.named_parameters() if f'lora_a_{idx}' in name or f'lora_a_{idx}' in name]
+        active_params = [param for name, param in self._model.named_parameters() if f'lora_a_{idx}' in name or f'lora_b_{idx}' in name]
         optimizer = config.instantiate(cfg_optimizer, active_params)
 
         return optimizer
@@ -895,23 +895,21 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     print("Finished forward pass")
                     self.print_memory_usage()
                 # Shift so that tokens < n predict n
-                # logits = logits[..., :-1, :].contiguous()
-                # labels = labels[..., 1:].contiguous()
-                # logits = logits.transpose(1, 2)
-
-                # _, _, idx1, idx2 = logits.shape
-                logits = logits[:, :, :-1, :]
-                logits = logits.reshape(-1, logits.size(2), logits.size(3)).contiguous()
-                # if self._is_rank_zero:
-                #     print(logits.shape)
+                logits = logits[..., :-1, :].contiguous()
                 labels = labels[..., 1:].contiguous()
                 logits = logits.transpose(1, 2)
+
+                # _, _, idx1, idx2 = logits.shape
+                # logits = logits[:, :, :-1, :]
+                # logits = logits.reshape(-1, logits.size(2), logits.size(3)).contiguous()
+                # # if self._is_rank_zero:
+                # #     print(logits.shape)
+                # labels = labels[..., 1:].contiguous()
+                # logits = logits.transpose(1, 2)
+                # labels = labels.repeat(self.num_adapters, 1)
+                # if self._is_rank_zero:
+                #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
                 
-                # if self._is_rank_zero:
-                #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
-                labels = labels.repeat(self.num_adapters, 1)
-                # if self._is_rank_zero:
-                #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
                 torch.cuda.empty_cache()
                 if self._is_rank_zero:
                     print("Finished processing logits")

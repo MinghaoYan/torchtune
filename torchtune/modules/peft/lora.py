@@ -14,6 +14,7 @@ from torch import nn, Tensor
 from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 from torchtune.modules.low_precision import _register_nf4_dispatch_ops  # noqa: F401
 from torchtune.modules.peft.peft_utils import AdapterModule
+from torchtune import utils
 
 
 class LoRALinear(nn.Module, AdapterModule):
@@ -227,8 +228,6 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         use_bias: bool = False,
         quantize_base: bool = False,
         bsz: int = 1,
-        device_rank: int = 0,
-        world_size: int = 1,
     ):
         super().__init__()
         self.in_dim = in_dim
@@ -251,16 +250,12 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
         self.lora_b = nn.Linear(in_features=sum(self.rank), out_features=out_dim, bias=False)
 
-        self.device_rank = device_rank
-        self.world_size = world_size
-        assert(len(self.rank) // world_size == 0, "Must evenly divide num lora adapters and world size")
+        self.world_size, self.device_rank = utils.get_world_size_and_rank()
+
+        assert(len(self.rank) // self.world_size == 0, "Must evenly divide num lora adapters and world size")
         # Create a rank-specific mask for the weight matrix
-        self.mask_a = torch.zeros_like(self.lora_a.weight, device=self.lora_a.weight.device)
-        self.mask_a = torch.zeros_like(self.lora_b.weight, device=self.lora_a.weight.device)
-        start_row = sum(self.rank[:device_rank])
-        end_row = sum(self.rank[:device_rank]) + self.rank[device_rank]
-        self.mask_a[:, start_row:end_row] = 1
-        self.mask_b[start_row:end_row, :] = 1
+        self.start_row = sum(self.rank[:self.device_rank])
+        self.end_row = sum(self.rank[:self.device_rank]) + self.rank[self.device_rank]
 
         # for idx in range(len(self.rank)):
         #     setattr(self, f'lora_a_0_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
@@ -339,6 +334,16 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         if self.disabled:
             return out
 
-        lora_out = self.lora_a(self.dropout(x) * self.mask_a)
-        lora_out = (self.alpha / self.rank) * self.lora_b(lora_out * self.mask_b)
+        # print(f"x.shape: {x.shape}")
+        # print(f"self.mask_a.shape: {self.mask_a.shape}")
+
+        lora_a_out = self.lora_a(self.dropout(x)) 
+        
+        mask = torch.zeros(lora_a_out.shape, device=lora_a_out.device, dtype=lora_a_out.dtype)
+        mask[:, :, self.start_row:self.end_row].fill_(1.0)
+        
+        # Apply the mask to lora_a_out
+        lora_a_out_masked = lora_a_out * mask
+
+        lora_out = (self.alpha[self.device_rank] / self.rank[self.device_rank]) * self.lora_b(lora_a_out_masked)
         return out + lora_out

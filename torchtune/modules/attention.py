@@ -166,95 +166,74 @@ class CausalSelfAttention(nn.Module):
             - Return the attention weights
             - Make application of positional embeddings optional
         """
-        # x has shape [b, s_x, d]
-        # y has shape [b, s_y, d]
-        b, s_x, _ = x.shape
-        s_y = y.shape[1] if y is not None else 0
+        # input has shape [b, s, d]
+        bsz, seq_len, _ = x.shape
 
-        if self.kv_cache and input_pos is None:
-            cache_size = self.kv_cache.size
-            input_pos = torch.arange(cache_size, cache_size + s_y, device=x.device)
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"seq_len ({seq_len}) of input tensor should be smaller "
+                f"than max_seq_len ({self.max_seq_len})"
+            )
 
-        # q has shape [b, s_x, num_heads * head_dim]
+        # q has shape [b, s, num_heads * head_dim]
+        # k has shape [b, s, num_kv_heads * head_dim]
+        # v has shape [b, s, num_kv_heads * head_dim]
         q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
-        q = q.view(b, s_x, self.num_kv_heads * q_per_kv, self.head_dim)
+
+        # q: [b, s, n_kv, q_per_kv, h_d]
+        # k: [b, s, n_kv, 1, h_d]
+        # v: [b, s, n_kv, 1, h_d]
+        q = q.view(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+        k = k.view(bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+        v = v.view(bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
+
+        # if needed, expand the key and value tensors to have the same shape
+        # as the query tensor by copying values across the relevant dim
+        if self.num_heads != self.num_kv_heads:
+            k = k.expand(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+            v = v.expand(bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
+
+        # llama2 applies the RoPE embeddings on tensors with shape
+        # [b, s, n_h, h_d]
+        # Reshape the tensors before we apply RoPE
+        q = q.reshape(bsz, seq_len, -1, self.head_dim)
+        k = k.reshape(bsz, seq_len, -1, self.head_dim)
+        v = v.reshape(bsz, seq_len, -1, self.head_dim)
 
         # Apply positional embeddings
-        if self.pos_embeddings is not None:
-            q = self.pos_embeddings(q, input_pos=input_pos)
+        q = self.pos_embeddings(q, input_pos=input_pos)
+        k = self.pos_embeddings(k, input_pos=input_pos)
 
-        # [b, n_h, s_x, h_d]
+        # [b, n_h, s, h_d]
         q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        # Normalize q
-        if self.q_norm is not None:
-            q = self.q_norm(q)
-
-        if y is None:
-            if self.kv_cache is None:
-                raise ValueError(
-                    "Must provide y input or use kv_cache to enable streaming decoding"
-                )
-            k = self.kv_cache.k_cache
-            v = self.kv_cache.v_cache
-        else:
-            # Update k and v shape, positional embeddings, and normalization
-
-            # k has shape [b, s_y, num_kv_heads * head_dim]
-            # v has shape [b, s_y, num_kv_heads * head_dim]
-            k = self.k_proj(y)
-            v = self.v_proj(y)
-
-            # k: [b, s_y, n_kv, 1, h_d]
-            # v: [b, s_y, n_kv, 1, h_d]
-            k = k.view(b, s_y, self.num_kv_heads, 1, self.head_dim)
-            v = v.view(b, s_y, self.num_kv_heads, 1, self.head_dim)
-
-            # if needed, expand the key and value tensors to have the same shape
-            # as the query tensor by copying values across the relevant dim
-            if self.num_heads != self.num_kv_heads:
-                k = k.expand(b, s_y, self.num_kv_heads, q_per_kv, self.head_dim)
-                v = v.expand(b, s_y, self.num_kv_heads, q_per_kv, self.head_dim)
-
-            # llama applies the RoPE embeddings on tensors with shape
-            # [b, s, n_h, h_d]
-            # Reshape the tensors before we apply RoPE
-            k = k.reshape(b, s_y, -1, self.head_dim)
-            v = v.reshape(b, s_y, -1, self.head_dim)
-
-            # Apply positional embeddings
-            if self.pos_embeddings is not None:
-                k = self.pos_embeddings(k, input_pos=input_pos)
-
-            # [b, n_h, s, h_d]
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-
-            # Normalize k
-            if self.k_norm is not None:
-                k = self.k_norm(k)
-
-            # Update key-value cache
-            if self.kv_cache is not None:
-                k, v = self.kv_cache.update(input_pos, k, v)
+        # Update key-value cache
+        if self.kv_cache is not None:
+            k, v = self.kv_cache.update(input_pos, k, v)
 
         # shape: [b, 1, s, s]
         if mask is not None:
             mask = mask[:, None, :, :]
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
+        # manual implementation of attention
+        # print(f"QKV Shapes: {q.shape}, {k.shape}, {v.shape}")
         output = nn.functional.scaled_dot_product_attention(
             q,
             k,
             v,
             attn_mask=mask,
             dropout_p=self.attn_dropout,
-            is_causal=self.kv_cache is None and mask is None and self.is_causal,
+            is_causal=self.kv_cache is None and mask is None,
         )
 
         # reshape the output to be the same shape as the input
-        output = output.transpose(1, 2).contiguous().view(b, s_x, -1)
+        output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
         return self.output_proj(output)

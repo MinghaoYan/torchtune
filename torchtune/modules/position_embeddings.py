@@ -96,7 +96,7 @@ class RotaryPositionalEmbeddings(nn.Module):
         for inference.
         """
         # input tensor has shape [b, s, n_h, h_d]
-        seq_len = x.size(-3)
+        seq_len = x.size(1)
 
         # extract the values based on whether input_pos is set or not
         rope_cache = (
@@ -111,9 +111,7 @@ class RotaryPositionalEmbeddings(nn.Module):
         # reshape the cache for broadcasting
         # tensor has shape [b, s, 1, h_d // 2, 2] if packed samples,
         # otherwise has shape [1, s, 1, h_d // 2, 2]
-        rope_cache = rope_cache.view(-1, 1, xshaped.shape[-4], 1, xshaped.size(-2), 2)
-        
-        # print(f"x shape is {xshaped.shape}, rope cache shape is {rope_cache.shape}")
+        rope_cache = rope_cache.view(-1, xshaped.size(1), 1, xshaped.size(3), 2)
 
         # tensor has shape [b, s, n_h, h_d // 2, 2]
         x_out = torch.stack(
@@ -127,5 +125,5 @@ class RotaryPositionalEmbeddings(nn.Module):
         )
 
         # tensor has shape [b, s, n_h, h_d]
-        x_out = x_out.flatten(-2)
+        x_out = x_out.flatten(3)
         return x_out.type_as(x)
