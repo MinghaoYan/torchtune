@@ -254,6 +254,14 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         self.device_rank = device_rank
         self.world_size = world_size
         assert(len(self.rank) // world_size == 0, "Must evenly divide num lora adapters and world size")
+        # Create a rank-specific mask for the weight matrix
+        self.mask_a = torch.zeros_like(self.lora_a.weight, device=self.lora_a.weight.device)
+        self.mask_a = torch.zeros_like(self.lora_b.weight, device=self.lora_a.weight.device)
+        start_row = sum(self.rank[:device_rank])
+        end_row = sum(self.rank[:device_rank]) + self.rank[device_rank]
+        self.mask_a[:, start_row:end_row] = 1
+        self.mask_b[start_row:end_row, :] = 1
+
         # for idx in range(len(self.rank)):
         #     setattr(self, f'lora_a_0_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
         #     setattr(self, f'lora_b_0_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))

@@ -683,7 +683,7 @@ def async_lora_llama3(
     else:
         mlp = llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)
 
-    layer = LoraTransformerDecoderLayer(
+    layer = TransformerDecoderLayer(
         attn=self_attn,
         mlp=mlp,
         sa_norm=RMSNorm(dim=embed_dim, eps=norm_eps),
@@ -698,7 +698,7 @@ def async_lora_llama3(
         if apply_lora_to_output
         else nn.Linear(embed_dim, vocab_size, bias=False)
     )
-    return LoraTransformerDecoder(
+    return TransformerDecoder(
         tok_embeddings=tok_embeddings,
         layer=layer,
         num_layers=num_layers,

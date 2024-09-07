@@ -166,117 +166,95 @@ class CausalSelfAttention(nn.Module):
             - Return the attention weights
             - Make application of positional embeddings optional
         """
-        # input has shape [b, s, d]
-        # print(f"attention input shape is {x.shape}")
-        if x.dim() == 3:
-            _, seq_len, _ = x.shape
-        elif x.dim() == 4:
-            _, _, seq_len, _ = x.shape
-        bsz = self.bsz
+        # x has shape [b, s_x, d]
+        # y has shape [b, s_y, d]
+        b, s_x, _ = x.shape
+        s_y = y.shape[1] if y is not None else 0
 
-        if seq_len > self.max_seq_len:
-            raise ValueError(
-                f"seq_len ({seq_len}) of input tensor should be smaller "
-                f"than max_seq_len ({self.max_seq_len})"
-            )
+        if self.kv_cache and input_pos is None:
+            cache_size = self.kv_cache.size
+            input_pos = torch.arange(cache_size, cache_size + s_y, device=x.device)
 
-        # q has shape [b, s, num_heads * head_dim]
-        # k has shape [b, s, num_kv_heads * head_dim]
-        # v has shape [b, s, num_kv_heads * head_dim]
-        q = self.q_proj(x, activated)
-        k = self.k_proj(x, activated)
-        v = self.v_proj(x, activated)
+        # q has shape [b, s_x, num_heads * head_dim]
+        q = self.q_proj(x)
 
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
-
-        max_len = -1
-        if q.dim() == 4:
-            max_len = max(max_len, q.shape[0])
-        if k.dim() == 4:
-            max_len = max(max_len, k.shape[0])
-        if v.dim() == 4:
-            max_len = max(max_len, v.shape[0])
-        assert(max_len > 0)
-
-        # print(q.shape, k.shape, v.shape)
-        if q.dim() == 3:
-            if q.shape[0] == bsz:
-                q = q.unsqueeze(dim=0)
-                q = q.expand(max_len, bsz, seq_len, self.num_heads * self.head_dim)
-            if q.shape[0] > bsz:
-                q = q.reshape(max_len, bsz, seq_len, self.num_heads * self.head_dim)
-        if k.dim() == 3:
-            if k.shape[0] == bsz:
-                k = k.unsqueeze(dim=0)
-                k = k.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
-            if k.shape[0] > bsz:
-                k = k.reshape(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
-        if v.dim() == 3:
-            if v.shape[0] == bsz:
-                v = v.unsqueeze(dim=0)
-                v = v.expand(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
-            if v.shape[0] > bsz:
-                v = v.reshape(max_len, bsz, seq_len, self.num_kv_heads * self.head_dim)
-        
-        # Find the lengths of lora adapters and expand accordingly
-        # print(max_len, bsz)
-        # print(f"new bsz is ", bsz)
-            
-        
-        # new_bsz = bsz * max_len
-
-        # q: [b, s, n_kv, q_per_kv, h_d]
-        # k: [b, s, n_kv, 1, h_d]
-        # v: [b, s, n_kv, 1, h_d]
-        q = q.reshape(max_len, bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-        k = k.reshape(max_len, bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
-        v = v.reshape(max_len, bsz, seq_len, self.num_kv_heads, 1, self.head_dim)
-
-        # if needed, expand the key and value tensors to have the same shape
-        # as the query tensor by copying values across the relevant dim
-        if self.num_heads != self.num_kv_heads:
-            k = k.expand(max_len, bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-            v = v.expand(max_len, bsz, seq_len, self.num_kv_heads, q_per_kv, self.head_dim)
-
-        # llama2 applies the RoPE embeddings on tensors with shape
-        # [b, s, n_h, h_d]
-        # Reshape the tensors before we apply RoPE
-        q = q.reshape(max_len, bsz, seq_len, -1, self.head_dim)
-        k = k.reshape(max_len, bsz, seq_len, -1, self.head_dim)
-        v = v.reshape(max_len, bsz, seq_len, -1, self.head_dim)
+        q = q.view(b, s_x, self.num_kv_heads * q_per_kv, self.head_dim)
 
         # Apply positional embeddings
-        # print(f"q shape is {q.shape}, input shape is {input_pos.shape}")
-        q = self.pos_embeddings(q, input_pos=input_pos)
-        k = self.pos_embeddings(k, input_pos=input_pos)
+        if self.pos_embeddings is not None:
+            q = self.pos_embeddings(q, input_pos=input_pos)
 
-        # [b, n_h, s, h_d]
-        q = q.transpose(2, 3)
-        k = k.transpose(2, 3)
-        v = v.transpose(2, 3)
+        # [b, n_h, s_x, h_d]
+        q = q.transpose(1, 2)
 
-        # Update key-value cache
-        if self.kv_cache is not None:
-            k, v = self.kv_cache.update(input_pos, k, v)
+        # Normalize q
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+
+        if y is None:
+            if self.kv_cache is None:
+                raise ValueError(
+                    "Must provide y input or use kv_cache to enable streaming decoding"
+                )
+            k = self.kv_cache.k_cache
+            v = self.kv_cache.v_cache
+        else:
+            # Update k and v shape, positional embeddings, and normalization
+
+            # k has shape [b, s_y, num_kv_heads * head_dim]
+            # v has shape [b, s_y, num_kv_heads * head_dim]
+            k = self.k_proj(y)
+            v = self.v_proj(y)
+
+            # k: [b, s_y, n_kv, 1, h_d]
+            # v: [b, s_y, n_kv, 1, h_d]
+            k = k.view(b, s_y, self.num_kv_heads, 1, self.head_dim)
+            v = v.view(b, s_y, self.num_kv_heads, 1, self.head_dim)
+
+            # if needed, expand the key and value tensors to have the same shape
+            # as the query tensor by copying values across the relevant dim
+            if self.num_heads != self.num_kv_heads:
+                k = k.expand(b, s_y, self.num_kv_heads, q_per_kv, self.head_dim)
+                v = v.expand(b, s_y, self.num_kv_heads, q_per_kv, self.head_dim)
+
+            # llama applies the RoPE embeddings on tensors with shape
+            # [b, s, n_h, h_d]
+            # Reshape the tensors before we apply RoPE
+            k = k.reshape(b, s_y, -1, self.head_dim)
+            v = v.reshape(b, s_y, -1, self.head_dim)
+
+            # Apply positional embeddings
+            if self.pos_embeddings is not None:
+                k = self.pos_embeddings(k, input_pos=input_pos)
+
+            # [b, n_h, s, h_d]
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+
+            # Normalize k
+            if self.k_norm is not None:
+                k = self.k_norm(k)
+
+            # Update key-value cache
+            if self.kv_cache is not None:
+                k, v = self.kv_cache.update(input_pos, k, v)
 
         # shape: [b, 1, s, s]
         if mask is not None:
-            mask = mask[:, :, None, :, :]
+            mask = mask[:, None, :, :]
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
-        # manual implementation of attention
         output = nn.functional.scaled_dot_product_attention(
             q,
             k,
             v,
             attn_mask=mask,
             dropout_p=self.attn_dropout,
-            is_causal=self.kv_cache is None and mask is None,
+            is_causal=self.kv_cache is None and mask is None and self.is_causal,
         )
 
         # reshape the output to be the same shape as the input
-        output = output.transpose(2, 3).contiguous().view(max_len, bsz, seq_len, -1)
-        # print(f"attention output shape is {output.shape}")
-
-        return self.output_proj(output, activated)
+        output = output.transpose(1, 2).contiguous().view(b, s_x, -1)
+        return self.output_proj(output)

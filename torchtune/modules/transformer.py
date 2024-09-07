@@ -69,22 +69,17 @@ class TransformerDecoderLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
-
-        # Expand x for multiple LoRA adapters
-        # print(attn_out.shape, x.shape)
-        if attn_out.shape[0] > x.shape[0]:
-            repeat_factor = attn_out.shape[0] // x.shape[0]
-            x = x.repeat(repeat_factor, 1, 1)
+        h = self.sa_norm(x)
+        attn_out = self.attn(h, h, mask=mask, input_pos=input_pos)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
-        h = attn_out + x
+        h = self.sa_scale(attn_out) + x
 
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h))
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
-        out = h + mlp_out
+        out = h + self.mlp_scale(mlp_out)
         return out
 
 
