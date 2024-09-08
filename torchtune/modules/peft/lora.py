@@ -15,7 +15,9 @@ from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 from torchtune.modules.low_precision import _register_nf4_dispatch_ops  # noqa: F401
 from torchtune.modules.peft.peft_utils import AdapterModule
 from torchtune import utils
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
+import torch.distributed as dist
 
 class LoRALinear(nn.Module, AdapterModule):
     """LoRA linear layer as introduced in `LoRA: Low-Rank Adaptation of Large Language Models <https://arxiv.org/abs/2106.09685>`_.
@@ -318,6 +320,26 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         #     adapter_params.append(f"lora_b_1_{idx}.weight")
         return adapter_params
 
+    
+    def all_gather_lora_b_weight(self):
+        # Ensure all the workers are synchronized
+        dist.barrier()
+
+        # Get the local weight (sharded part)
+        local_weight = self.lora_b.weight
+
+        # Create an empty list of tensors for gathering the weights from all ranks
+        gathered_weights = [torch.zeros_like(local_weight) for _ in range(dist.get_world_size())]
+
+        # Perform the all-gather operation across all ranks
+        dist.all_gather(gathered_weights, local_weight)
+
+        # Concatenate the gathered shards into the full weight
+        full_weight = torch.cat(gathered_weights, dim=0)
+
+        return full_weight
+
+
     def forward(self, x: Tensor, activated: int = 0) -> Tensor:
         """
         Args:
@@ -339,11 +361,38 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
 
         lora_a_out = self.lora_a(self.dropout(x)) 
         
-        mask = torch.zeros(lora_a_out.shape, device=lora_a_out.device, dtype=lora_a_out.dtype)
-        mask[:, :, self.start_row:self.end_row].fill_(1.0)
-        
-        # Apply the mask to lora_a_out
-        lora_a_out_masked = lora_a_out * mask
+        # Initialize output accumulator for merging multiple LoRA paths
+        lora_out_total = torch.zeros(out.shape, device=x.device, dtype=x.dtype)
 
-        lora_out = (self.alpha[self.device_rank] / self.rank[self.device_rank]) * self.lora_b(lora_a_out_masked)
-        return out + lora_out
+        # Manually gather the full weight matrix across all ranks
+        gathered_weight = self.all_gather_lora_b_weight()
+
+        # Ensure that `gathered_weight` has the correct shape (out_dim, in_dim)
+        gathered_weight = gathered_weight.view(self.lora_b.out_features, self.lora_b.in_features).to(lora_a_out.dtype)
+
+        # Apply the LoRA process separately for each rank in self.rank
+        start_idx = 0
+        for i, rank_i in enumerate(self.rank):
+            # Determine the range for the current rank
+            end_idx = start_idx + rank_i
+
+            # Create a mask for this specific rank
+            mask = torch.zeros_like(lora_a_out)
+            mask[:, :, start_idx:end_idx].fill_(1.0)
+
+            # Mask and process lora_a_out for this specific rank
+            lora_a_out_masked = lora_a_out * mask
+            # print(f"lora_a_out shape is {lora_a_out.shape}, mask shape is {mask.shape}")
+            # print(f"lora_a_out_masked shape is {lora_a_out_masked.shape}")
+            # print(f"gathered weights shape is {gathered_weight.shape}")
+            # Use the all-gathered weight for this rank segment
+            lora_out = F.linear(lora_a_out_masked, gathered_weight, bias=None)
+
+            # Scale and accumulate the output for this rank
+            lora_out_total = lora_out_total + (self.alpha[i] / self.rank[i]) * lora_out
+
+            # Move to the next rank segment
+            start_idx = end_idx
+
+        # Return the final output: base + accumulated LoRA output
+        return out + lora_out_total
