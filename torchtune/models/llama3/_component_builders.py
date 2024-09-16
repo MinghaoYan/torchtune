@@ -394,6 +394,7 @@ def lora_llama3_mlp(
     lora_alpha: float,
     lora_dropout: float = 0.0,
     quantize_base: bool = False,
+    bsz: int = 1,
 ) -> FeedForward:
     gate_proj = LoRALinear(
         in_dim=dim,
@@ -402,6 +403,7 @@ def lora_llama3_mlp(
         alpha=lora_alpha,
         dropout=lora_dropout,
         quantize_base=quantize_base,
+        bsz=bsz,
     )
     down_proj = LoRALinear(
         in_dim=hidden_dim,
@@ -410,6 +412,7 @@ def lora_llama3_mlp(
         alpha=lora_alpha,
         dropout=lora_dropout,
         quantize_base=quantize_base,
+        bsz=bsz,
     )
     up_proj = LoRALinear(
         in_dim=dim,
@@ -418,6 +421,7 @@ def lora_llama3_mlp(
         alpha=lora_alpha,
         dropout=lora_dropout,
         quantize_base=quantize_base,
+        bsz=bsz,
     )
     return FeedForward(
         gate_proj=gate_proj,

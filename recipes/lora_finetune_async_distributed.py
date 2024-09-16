@@ -281,6 +281,13 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             else None,
         )
 
+        self._optimizer2 = self._setup_optimizer(
+            cfg_optimizer=cfg.optimizer,
+            opt_state_dict=checkpoint_dict[utils.OPT_KEY]
+            if self._resume_from_checkpoint
+            else None,
+        )
+
         self._loss_fn = config.instantiate(cfg.loss)
 
         # sampler and dataloader depend on the tokenizer and loss_fn and should be
@@ -334,12 +341,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             optimizer=self._optimizer1,
         )
 
-        # self._lr_scheduler2 = self._setup_lr_scheduler_async(
-        #     cfg_lr_scheduler=cfg.lr_scheduler,
-        #     num_training_steps=self.total_epochs * self._steps_per_epoch,
-        #     last_epoch=self.global_step - 1,
-        #     optimizer=self._optimizer2,
-        # )
+        self._lr_scheduler2 = self._setup_lr_scheduler_async(
+            cfg_lr_scheduler=cfg.lr_scheduler,
+            num_training_steps=self.total_epochs * self._steps_per_epoch,
+            last_epoch=self.global_step - 1,
+            optimizer=self._optimizer2,
+        )
 
         # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
         # if cfg is missing profiler key or if `cfg.profiler.enabled = False`
@@ -619,8 +626,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 if not self._is_rank_zero
                 else None
             ),
-            backward_prefetch=torch.distributed.fsdp.BackwardPrefetch.BACKWARD_POST, #alternative: backward_pre
-            forward_prefetch=True,
+            backward_prefetch=torch.distributed.fsdp.BackwardPrefetch.BACKWARD_PRE, #alternative: backward_pre
+            forward_prefetch=False,
             use_orig_params=True,
         )
 
@@ -851,8 +858,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         self._profiler.start()
 
-        if self._is_rank_zero:
-            self.print_memory_usage()
+        # if self._is_rank_zero:
+        #     self.print_memory_usage()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
 
@@ -1202,7 +1209,86 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             
             if self._is_rank_zero:
                 print(f"end softmax batch {item.batch_idx}")
+
+    def train_by_stream_loop(self, optimizer, lr_scheduler, tokens, mask, input_pos, labels, idx) -> None:
+
+            logits = self._model(tokens, mask=mask, input_pos=input_pos)
+
+            # Shift so that tokens < n predict n
+            logits = logits[..., :-1, :].contiguous()
+            labels = labels[..., 1:].contiguous()
+            logits = logits.transpose(1, 2)
+            
+            # torch.cuda.empty_cache()
+
+            # Compute loss
+            loss = self._loss_fn(logits, labels)
+            # free logits otherwise it peaks backward memory
+            del logits
+            del labels
+
+            loss = loss / self._gradient_accumulation_steps
+
+            loss.backward()
+
+            # Step with optimizer
+            if (idx + 1) % self._gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                lr_scheduler.step()
+
+                # Update the number of steps when the weights are updated
+                # self.global_step += 1
     
+    def train_by_stream(self) -> None:
+        """
+        The core training loop, step by step.
+        """
+        # clean up before training begins
+        utils.cleanup_before_training()
+
+        # zero out the gradients before starting training
+        self._optimizer1.zero_grad()
+        self._optimizer2.zero_grad()
+
+        # Create two CUDA streams
+        stream1 = torch.cuda.Stream()
+        stream2 = torch.cuda.Stream()
+
+        for idx, batch in enumerate(self._dataloader):
+            if (
+                self.max_steps_per_epoch is not None
+                and (idx // self._gradient_accumulation_steps)
+                == self.max_steps_per_epoch
+            ):
+                break
+
+            # Both are shape [b, s]
+            tokens, labels = batch["tokens"], batch["labels"]
+            # Get the attention mask and position ids from the dataset if they
+            # exist. Currently, only sample packing in PackedDataset returns these
+            mask = batch.get("mask", None)  # shape [b, s, s]
+            input_pos = batch.get("input_pos", None)  # shape [b, s]
+
+            tokens = tokens.to(self._device)
+
+            labels = labels.to(self._device)
+            mask = mask.to(self._device) if mask is not None else None
+            input_pos = (
+                input_pos.to(self._device) if input_pos is not None else None
+            )
+
+            with torch.cuda.stream(stream1):
+                if self._is_rank_zero:
+                    print(f"Start stream 1", flush=True)
+                self.train_by_stream_loop(self._optimizer1, self._lr_scheduler1, tokens, mask, input_pos, labels, idx)
+            
+            with torch.cuda.stream(stream2):
+                if self._is_rank_zero:
+                    print(f"Start stream 2", flush=True)
+                self.train_by_stream_loop(self._optimizer2, self._lr_scheduler2, tokens, mask, input_pos, labels, idx)
+
+
 
     def cleanup(self) -> None:
         if self._is_rank_zero:
@@ -1232,6 +1318,7 @@ def recipe_main(cfg: DictConfig) -> None:
     recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
+    # recipe.train_by_stream()
     # asyncio.run(recipe.train_by_step())
     recipe.cleanup()
 

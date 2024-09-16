@@ -11,20 +11,21 @@
 
 # Model Arguments
 model:
-  _component_: torchtune.models.llama3.lora_llama3_70b
-  lora_attn_modules: ['q_proj', 'k_proj', 'v_proj']
-  apply_lora_to_mlp: False
-  apply_lora_to_output: False
-  lora_rank: 16
-  lora_alpha: 32
+  _component_: torchtune.models.llama3.async_lora_llama3_70b
+  lora_attn_modules: ["q_proj", "k_proj", "v_proj", "output_proj", "gate_proj", "up_proj", "down_proj"]
+  apply_lora_to_mlp: True
+  apply_lora_to_output: True
+  lora_rank: [16, 16, 16, 16, 16, 16, 16, 16]
+  lora_alpha: [16, 16, 16, 16, 16, 16, 16, 16]
+  bsz: 4
 
 tokenizer:
   _component_: torchtune.models.llama3.llama3_tokenizer
-  path: /tmp/Meta-Llama-3-70B-Instruct/original/tokenizer.model
+  path: /tmp/Meta-Llama-3.1-70B-Instruct/original/tokenizer.model
 
 checkpointer:
   _component_: torchtune.utils.FullModelHFCheckpointer
-  checkpoint_dir:  /tmp/Meta-Llama-3-70B-Instruct
+  checkpoint_dir:  /tmp/Meta-Llama-3.1-70B-Instruct
   checkpoint_files: [
     model-00001-of-00030.safetensors,
     model-00002-of-00030.safetensors,
@@ -58,16 +59,16 @@ checkpointer:
     model-00030-of-00030.safetensors,
   ]
   recipe_checkpoint: null
-  output_dir: /tmp/Meta-Llama-3-70B-Instruct
+  output_dir: /tmp/Meta-Llama-3.1-70B-Instruct
   model_type: LLAMA3
 resume_from_checkpoint: False
 
 # Dataset and Sampler
 dataset:
-  _component_: torchtune.datasets.alpaca_dataset
+  _component_: torchtune.datasets.hellaswag_dataset
 seed: null
 shuffle: True
-batch_size: 2
+batch_size: 4
 
 # Optimizer and Scheduler
 optimizer:
@@ -83,7 +84,7 @@ loss:
 
 # Training
 epochs: 1
-max_steps_per_epoch: null
+max_steps_per_epoch: 200
 gradient_accumulation_steps: 1
 
 # Logging
