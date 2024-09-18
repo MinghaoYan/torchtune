@@ -1212,33 +1212,33 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
     def train_by_stream_loop(self, optimizer, lr_scheduler, tokens, mask, input_pos, labels, idx) -> None:
 
-            logits = self._model(tokens, mask=mask, input_pos=input_pos)
+        logits = self._model(tokens, mask=mask, input_pos=input_pos)
 
-            # Shift so that tokens < n predict n
-            logits = logits[..., :-1, :].contiguous()
-            labels = labels[..., 1:].contiguous()
-            logits = logits.transpose(1, 2)
-            
-            # torch.cuda.empty_cache()
+        # Shift so that tokens < n predict n
+        logits = logits[..., :-1, :].contiguous()
+        labels = labels[..., 1:].contiguous()
+        logits = logits.transpose(1, 2)
+        
+        # torch.cuda.empty_cache()
 
-            # Compute loss
-            loss = self._loss_fn(logits, labels)
-            # free logits otherwise it peaks backward memory
-            del logits
-            del labels
+        # Compute loss
+        loss = self._loss_fn(logits, labels)
+        # free logits otherwise it peaks backward memory
+        del logits
+        del labels
 
-            loss = loss / self._gradient_accumulation_steps
+        loss = loss / self._gradient_accumulation_steps
 
-            loss.backward()
+        loss.backward()
 
-            # Step with optimizer
-            if (idx + 1) % self._gradient_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                lr_scheduler.step()
+        # Step with optimizer
+        if (idx + 1) % self._gradient_accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            lr_scheduler.step()
 
-                # Update the number of steps when the weights are updated
-                # self.global_step += 1
+            # Update the number of steps when the weights are updated
+            # self.global_step += 1
     
     def train_by_stream(self) -> None:
         """
