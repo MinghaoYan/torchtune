@@ -74,8 +74,10 @@ class TransformerDecoderLayer(nn.Module):
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
 
+        # print(f"h shape is {h.shape}")
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h))
+        # print(f"mlp out shape is {mlp_out.shape}")
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + mlp_out

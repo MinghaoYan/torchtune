@@ -856,6 +856,17 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         running_loss = 0
         num_tokens = 0
 
+        # Collect all LoRA modules in the model
+        lora_modules = []
+        for module in self._model.modules():
+            if hasattr(module, 'lora_a') and hasattr(module, 'lora_b'):
+                lora_modules.append(module)
+
+        # Initialize optimizer with all LoRA parameters
+        lora_parameters = []
+        for module in lora_modules:
+            lora_parameters.extend([module.lora_a.weight, module.lora_b.weight])
+
         self._profiler.start()
 
         # if self._is_rank_zero:
@@ -891,31 +902,112 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     input_pos.to(self._device) if input_pos is not None else None
                 )
 
-                if self._is_rank_zero:
-                    print("Finished processing inputs, now ready for forward pass")
-                    self.print_memory_usage()
-                logits = self._model(tokens, mask=mask, input_pos=input_pos)
+                # num_loras = 
+                # Repeat the tokens `num_ranks` times along the batch dimension (dim=0)
+                # if tokens.shape is (bsz, s), it will become (num_ranks * bsz, s)
+                print(f"token shape is {tokens.shape}")
+                tokens_repeated = tokens.repeat(self.num_adapters, 1)
+                print(f"token repeat shape is {tokens_repeated.shape}")
 
-                # self._model._free_full_params()  
+                # Similarly, repeat labels, mask, and input_pos if required
+                labels_repeated = labels.repeat(self.num_adapters, 1)
 
-                if self._is_rank_zero:
-                    print("Finished forward pass")
-                    self.print_memory_usage()
-                # Shift so that tokens < n predict n
-                logits = logits[..., :-1, :].contiguous()
-                labels = labels[..., 1:].contiguous()
-                logits = logits.transpose(1, 2)
+                mask_repeated = mask.repeat(self.num_adapters, 1) if mask is not None else None
+                input_pos_repeated = input_pos.repeat(self.num_adapters, 1) if input_pos is not None else None
 
-                # _, _, idx1, idx2 = logits.shape
-                # logits = logits[:, :, :-1, :]
-                # logits = logits.reshape(-1, logits.size(2), logits.size(3)).contiguous()
-                # # if self._is_rank_zero:
-                # #     print(logits.shape)
-                # labels = labels[..., 1:].contiguous()
-                # logits = logits.transpose(1, 2)
-                # labels = labels.repeat(self.num_adapters, 1)
+                # Initialize accumulators for gradients for this batch
+                accum_lora_a_grads = {module: torch.zeros_like(module.lora_a.weight) for module in lora_modules}
+                accum_lora_b_grads = {module: torch.zeros_like(module.lora_b.weight) for module in lora_modules}
+
                 # if self._is_rank_zero:
-                #     print(f"label shape {labels.shape}, logits shape {logits.shape}")
+                #     print("Finished processing inputs, now ready for forward pass")
+                #     self.print_memory_usage()
+                # logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
+                # # Shift so that tokens < n predict n
+                # logits = logits[..., :-1, :].contiguous()
+                # labels_shifted = labels_repeated[..., 1:].contiguous()
+                # logits = logits.transpose(1, 2)
+
+                bsz = self._dataloader.batch_size
+
+                # Loop over each LoRA adapter index 'i'
+                for i in range(self.num_adapters):
+                    # Recompute forward pass for current LoRA adapter to avoid retain_graph
+                    # combined_output, lora_outputs = self._model(tokens, mask=mask, input_pos=input_pos)
+                    logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
+                    logits = logits[..., :-1, :].contiguous()
+                    labels_shifted = labels_repeated[..., 1:].contiguous()
+                    logits = logits.transpose(1, 2)
+
+                    lora_output = logits[i * bsz:(i + 1) * bsz, ...]
+                    lora_labels = labels_shifted[i * bsz:(i + 1) * bsz, ...]
+
+                    # Compute loss
+                    # logits = lora_output[..., :-1, :].contiguous()
+                    # logits = logits.transpose(1, 2)
+                    loss = self._loss_fn(lora_output, lora_labels)
+                    loss = loss / self._gradient_accumulation_steps
+                    running_loss += loss.item()
+
+                    # Compute gradients w.r.t. all LoRA parameters
+                    lora_params = []
+                    for module in lora_modules:
+                        lora_params.extend([module.lora_a.weight, module.lora_b.weight])
+
+                    print(f"loss is {loss}")
+
+                    grads = torch.autograd.grad(
+                        loss,
+                        lora_params,
+                        retain_graph=False,  # No need to retain graph as we recomputed forward pass
+                        create_graph=False,
+                    )
+                    for idx, item in enumerate(grads):
+                        if item.shape != lora_params[idx].shape:
+                            print(f"idx {idx} shape not equal, param shape is {lora_params[idx].shape}, grads shape is {item.shape}")
+
+                    # Process gradients for each module
+                    grad_idx = 0
+                    for module in lora_modules:
+
+                        # Get gradients and reshape
+                        lora_a_grad = grads[grad_idx].view(module.lora_a.out_features // dist.get_world_size(), module.lora_a.in_features)
+                        grad_idx += 1
+                        lora_b_grad = grads[grad_idx].view(module.lora_b.out_features, module.lora_b.in_features // dist.get_world_size())
+                        grad_idx += 1
+
+                        # Get start and end indices for the current LoRA adapter in this module
+                        start_idx = sum(module.rank[:i])
+                        end_idx = start_idx + module.rank[i]
+
+                        # Mask gradients for lora_a.weight
+                        mask_a = torch.zeros_like(lora_a_grad)
+                        mask_a[start_idx:end_idx, :] = 1
+                        lora_a_grad = lora_a_grad * mask_a
+
+                        # Mask gradients for lora_b.weight
+                        mask_b = torch.zeros_like(lora_b_grad)
+                        mask_b[:, start_idx:end_idx] = 1
+                        lora_b_grad = lora_b_grad * mask_b
+
+                        if dist.get_world_size() == 1:
+                            accum_lora_a_grads[module] += lora_a_grad
+                            accum_lora_b_grads[module] += lora_b_grad
+                        else:
+                            # Flatten the gradients back
+                            lora_a_grad_flat = lora_a_grad.contiguous().view(-1)
+                            lora_b_grad_flat = lora_b_grad.contiguous().view(-1)
+
+                            # Accumulate gradients
+                            accum_lora_a_grads[module] += lora_a_grad_flat
+                            accum_lora_b_grads[module] += lora_b_grad_flat
+
+                # Assign accumulated gradients to parameter .grad attributes
+                for module in lora_modules:
+                    module.lora_a.weight.grad = accum_lora_a_grads[module]
+                    module.lora_b.weight.grad = accum_lora_b_grads[module]
+
+
                 
                 torch.cuda.empty_cache()
                 if self._is_rank_zero:
@@ -923,15 +1015,15 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     self.print_memory_usage()
                 # print(torch.cuda.memory_summary())
 
-                # Compute loss
-                loss = self._loss_fn(logits, labels)
-                # free logits otherwise it peaks backward memory
-                del logits
-                del labels
+                # # Compute loss
+                # loss = self._loss_fn(logits, labels)
+                # # free logits otherwise it peaks backward memory
+                # del logits
+                # del labels
 
-                loss = loss / self._gradient_accumulation_steps
-                running_loss += loss
-                loss.backward()
+                # loss = loss / self._gradient_accumulation_steps
+                # running_loss += loss
+                # loss.backward()
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -942,10 +1034,10 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     # Update the number of steps when the weights are updated
                     self.global_step += 1
 
-                    loss_to_log = running_loss.item()
+                    # loss_to_log = running_loss.item()
                     pbar.update(1)
                     pbar.set_description(
-                        f"{curr_epoch+1}|{self.global_step}|Loss: {loss_to_log}"
+                        f"{curr_epoch+1}|{self.global_step}|Loss: {running_loss}"
                     )
 
                     # Log per-step metrics
@@ -955,7 +1047,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                     ):
                         time_per_step = time.perf_counter() - t0
                         log_dict = {
-                            "loss": loss_to_log,
+                            "loss": running_loss,
                             "lr": self._optimizer1.param_groups[0]["lr"],
                             "tokens_per_second_per_gpu": num_tokens / time_per_step,
                         }
@@ -989,307 +1081,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         print(f"Max Memory Allocated: {torch.cuda.max_memory_allocated() / (1024 ** 3):.2f} GB")
         print(f"Memory Reserved: {torch.cuda.memory_reserved() / (1024 ** 3):.2f} GB")
         print(f"Max Memory Reserved: {torch.cuda.max_memory_reserved() / (1024 ** 3):.2f} GB")
-
-
-    def peek_queue(self, q):
-        if not q.queue:
-            return None
-        return [q.queue[0]]
-
-    async def safe_dispatch_iteration(self, task):
-        try:
-            await self.dispatch_iteration(task)
-        except Exception as e:
-            # Log the error with the relevant task information and the actual error message
-            log.error(
-                f"Error in task with batch_idx={task.batch_idx}, source={task.source}: {str(e)}",
-                exc_info=True  # This will include the traceback in the log
-            )
-        
-    async def train_by_step(self) -> None:
-        """
-        The core training loop, step by step.
-        """
-        # clean up before training begins
-        utils.cleanup_before_training()
-
-        # zero out the gradients before starting training
-        self._optimizer1.zero_grad()
-        self._optimizer2.zero_grad()
-
-        curr_epoch = self.epochs_run
-        # Update the sampler to ensure data is correctly shuffled across epochs
-        # in case shuffle is True
-        self._sampler.set_epoch(curr_epoch)
-        
-        self.processed_batches = [0, 0]
-
-        self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 0))
-        self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 0))
-        # self.fwd_queue.put(QueueObject(0, 0, "fwd", None, 1))
-        # self.fwd_queue.put(QueueObject(1, 0, "fwd", None, 1))
-
-        tasks = set()
-        priority_map = {'fwd': 1, 'softmax': 2, 'bwd': 3}
-
-        while self.fwd_queue or self.bwd_queue or self.softmax_queue:
-            fwd_ptr = self.peek_queue(self.fwd_queue) or []
-            bwd_ptr = self.peek_queue(self.bwd_queue) or []
-            softmax_ptr = self.peek_queue(self.softmax_queue) or []
-
-            combined_queue = fwd_ptr + bwd_ptr + softmax_ptr
-            sorted_list = sorted(combined_queue, key=lambda x: (x.batch_idx, priority_map[x.source]))
-
-            if len(sorted_list) > 0:
-                if len(tasks) < 2:
-                    tasks.add(asyncio.create_task(self.safe_dispatch_iteration(sorted_list[0])))
-
-                if len(sorted_list) > 1 and len(tasks) < 2:
-                    tasks.add(asyncio.create_task(self.safe_dispatch_iteration(sorted_list[1])))
-
-            if tasks:
-                # Wait for the first completed task
-                # done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for done_task in asyncio.as_completed(tasks):
-                    await done_task
-                    tasks.remove(done_task)
-
-
-    def retrieve_data(self, batch_idx):
-        # Calculate the start and end indices for the batch
-        start_index = batch_idx * self._dataloader.batch_size
-        end_index = start_index + self._dataloader.batch_size
-
-        if self._is_rank_zero:
-            print(f"Start index: {start_index}, End index: {end_index}")
-
-        # Create a list of indices for the batch
-        subset_indices = list(range(start_index, end_index))
-        
-        # Create a Subset from the dataset using the calculated indices
-        subset = torch.utils.data.Subset(self._dataloader.dataset, subset_indices)
-        
-        # Create a DataLoader for this subset
-        subset_loader = torch.utils.data.DataLoader(subset, batch_size=self._dataloader.batch_size, num_workers=0, 
-                shuffle=False, collate_fn=partial(
-                                            utils.padded_collate,
-                                            padding_idx=self._tokenizer.pad_id,
-                                            ignore_idx=self._loss_fn.ignore_index,
-                                        ))
-        
-        # Retrieve the batch from the subset DataLoader
-        batch = next(iter(subset_loader))
-
-        # Process the batch as usual
-        tokens = batch["tokens"]
-        labels = batch["labels"]
-        mask = batch.get("mask", None)
-        input_pos = batch.get("input_pos", None)
-
-        # if self._is_rank_zero:
-        #     print(f"tokens are: {tokens}")
-        #     print(f"labels are: {labels}")
-        #     print(f"mask are: {mask}")
-
-        # Convert to tensors if they are not already
-        tokens = tokens.to(self._device)
-        labels = labels.to(self._device)
-        mask = mask.to(self._device) if mask is not None else None
-        input_pos = input_pos.to(self._device) if input_pos is not None else None
-
-        # if self._is_rank_zero:
-        #     print(f"tokens shapes are: {tokens.shape}")
-        #     print(f"labels shapes are: {labels.shape}")
-
-        return tokens, mask, input_pos, labels
-
-
-    async def dispatch_layer(self, item):
-        if item.source == "fwd":
-            new_input = self.layers[item.layer_idx](layer_input)
-
-            if layer_idx == self.num_layers - 1:
-                # TODO: handle the output projection here
-
-                self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", new_input))
-            else:
-                self.fwd_queue.put(QueueObject(item.batch_idx, item.layer_idx+1, "fwd", new_input))
-        elif item.source == "bwd":
-            if layer_idx == self.num_layers - 1:
-                #TODO: handle 
-                loss = criterion(activation, target)
-                loss.backward(retain_graph=True)
-
-
-            if layer_idx == 0:
-                # TODO: handle the output projection backprop here
-
-                # Get new input
-                self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", new_input))
-            else:
-                self.bwd_queue.put(QueueObject(item.batch_idx, item.layer_idx-1, "bwd", new_input))
-        elif item.source == "softmax":
-
-            logits = self.layer_input[..., :-1, :].contiguous()
-            labels = labels[..., 1:].contiguous()
-            logits = logits.transpose(1, 2)
-
-            # print(f"label shape {labels.shape}, logits shape {logits.shape}")
-            labels = labels.repeat(self.num_adapters, 1)
-            # Compute loss
-            loss = self._loss_fn(logits, labels)
-            # free logits otherwise it peaks backward memory
-            del logits
-
-            loss = loss / self._gradient_accumulation_steps
-            
-            self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss))
-
-    async def dispatch_iteration(self, item):
-        if item.source == "fwd":
-            if self._is_rank_zero:
-                print(f"start fwd batch {item.batch_idx}")
-            self.fwd_queue.get()
-            tokens, mask, input_pos, labels = self.retrieve_data(item.batch_idx)
-            logits = self._model(tokens, mask=mask, input_pos=input_pos, activated=item.lora_idx)
-            self.softmax_queue.put(QueueObject(item.batch_idx, -1, "softmax", logits, item.lora_idx, labels=labels))
-            # self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
-            if self._is_rank_zero:
-                print(f"end fwd batch {item.batch_idx}")
-        
-        elif item.source == "bwd":
-            if self._is_rank_zero:
-                print(f"start bwd batch {item.batch_idx}")
-            self.bwd_queue.get()
-            # item.input.backward()
-
-            # Step with optimizer
-            if (item.batch_idx + 1) % self._gradient_accumulation_steps == 0:
-                getattr(self, f"_optimizer{item.lora_idx+1}").step()
-                getattr(self, f"_optimizer{item.lora_idx+1}").zero_grad(set_to_none=True)
-                getattr(self, f"_lr_scheduler{item.lora_idx+1}").step()
-
-                # Update the number of steps when the weights are updated
-                self.global_step += 1
-            
-            self.processed_batches[item.lora_idx] += 1
-            # Get new input
-            if self.processed_batches[item.lora_idx] < self.num_batches * (self.total_epochs - self.epochs_run):
-                self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
-            if self._is_rank_zero:
-                print(f"end bwd batch {item.batch_idx}")
-
-        elif item.source == "softmax":
-            if self._is_rank_zero:
-                print(f"start softmax batch {item.batch_idx}")
-            self.softmax_queue.get()
-            
-            logits = item.input[:, :, :-1, :]
-            logits = logits.reshape(-1, logits.size(2), logits.size(3))
-            labels = item.labels[..., 1:].contiguous()
-            logits = logits.transpose(1, 2).contiguous()
-            
-            labels = labels.repeat(self.num_adapters, 1)
-            
-            # Compute loss
-            loss = self._loss_fn(logits, labels)
-            if self._is_rank_zero:
-                print(f"softmax batch {item.batch_idx} compute loss")
-            # free logits otherwise it peaks backward memory
-            del logits
-            del labels
-            
-            loss = loss / self._gradient_accumulation_steps
-
-            # print(f"do loss here {item.batch_idx}")
-
-            # loss.backward(retain_graph=True)
-            # self.bwd_queue.put(QueueObject(item.batch_idx, self.num_layers - 1, "bwd", loss, item.lora_idx))
-            self.fwd_queue.put(QueueObject(item.batch_idx+1, 0, "fwd", None, item.lora_idx))
-            
-            if self._is_rank_zero:
-                print(f"end softmax batch {item.batch_idx}")
-
-    def train_by_stream_loop(self, optimizer, lr_scheduler, tokens, mask, input_pos, labels, idx) -> None:
-
-        logits = self._model(tokens, mask=mask, input_pos=input_pos)
-
-        # Shift so that tokens < n predict n
-        logits = logits[..., :-1, :].contiguous()
-        labels = labels[..., 1:].contiguous()
-        logits = logits.transpose(1, 2)
-        
-        # torch.cuda.empty_cache()
-
-        # Compute loss
-        loss = self._loss_fn(logits, labels)
-        # free logits otherwise it peaks backward memory
-        del logits
-        del labels
-
-        loss = loss / self._gradient_accumulation_steps
-
-        loss.backward()
-
-        # Step with optimizer
-        if (idx + 1) % self._gradient_accumulation_steps == 0:
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            lr_scheduler.step()
-
-            # Update the number of steps when the weights are updated
-            # self.global_step += 1
     
-    def train_by_stream(self) -> None:
-        """
-        The core training loop, step by step.
-        """
-        # clean up before training begins
-        utils.cleanup_before_training()
-
-        # zero out the gradients before starting training
-        self._optimizer1.zero_grad()
-        self._optimizer2.zero_grad()
-
-        # Create two CUDA streams
-        stream1 = torch.cuda.Stream()
-        stream2 = torch.cuda.Stream()
-
-        for idx, batch in enumerate(self._dataloader):
-            if (
-                self.max_steps_per_epoch is not None
-                and (idx // self._gradient_accumulation_steps)
-                == self.max_steps_per_epoch
-            ):
-                break
-
-            # Both are shape [b, s]
-            tokens, labels = batch["tokens"], batch["labels"]
-            # Get the attention mask and position ids from the dataset if they
-            # exist. Currently, only sample packing in PackedDataset returns these
-            mask = batch.get("mask", None)  # shape [b, s, s]
-            input_pos = batch.get("input_pos", None)  # shape [b, s]
-
-            tokens = tokens.to(self._device)
-
-            labels = labels.to(self._device)
-            mask = mask.to(self._device) if mask is not None else None
-            input_pos = (
-                input_pos.to(self._device) if input_pos is not None else None
-            )
-
-            with torch.cuda.stream(stream1):
-                if self._is_rank_zero:
-                    print(f"Start stream 1", flush=True)
-                self.train_by_stream_loop(self._optimizer1, self._lr_scheduler1, tokens, mask, input_pos, labels, idx)
-            
-            with torch.cuda.stream(stream2):
-                if self._is_rank_zero:
-                    print(f"Start stream 2", flush=True)
-                self.train_by_stream_loop(self._optimizer2, self._lr_scheduler2, tokens, mask, input_pos, labels, idx)
-
-
-
     def cleanup(self) -> None:
         if self._is_rank_zero:
             self._metric_logger.close()
@@ -1318,8 +1110,7 @@ def recipe_main(cfg: DictConfig) -> None:
     recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
-    # recipe.train_by_stream()
-    # asyncio.run(recipe.train_by_step())
+
     recipe.cleanup()
 
 
