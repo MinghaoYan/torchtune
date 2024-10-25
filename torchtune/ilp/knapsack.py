@@ -2,6 +2,7 @@ import cvxpy as cp
 import numpy as np
 import json
 import argparse
+import yaml
 
 # def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memory,
 #                             base_weights_memory, base_activations_memory, frag_memory,
@@ -221,15 +222,13 @@ import argparse
 #         print(f"Fixed FSDP Level: {fsdp_level_value}")
 #     return gpus_per_group, is_rank, fsdp_level_value, result
 
-# import cvxpy as cp
-# import numpy as np
 
 def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memory,
                             base_weights_memory, base_activations_memory, frag_memory,
                             lora_rank_limits, fsdp_level=None):
     MIN_LORA_EXPONENT = 3
     MAX_LORA_EXPONENT = 7
-    pp_size = 1 
+    pp_size = 1  # As per your request
 
     # Possible exponents and corresponding ranks
     possible_exponents = list(range(MIN_LORA_EXPONENT, MAX_LORA_EXPONENT + 1))
@@ -237,45 +236,48 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
 
     # Possible tensor parallel sizes (powers of two up to total_gpus)
     tp_sizes = [2 ** i for i in range(int(np.log2(total_gpus)) + 1) if 2 ** i <= total_gpus]
+    
+    # Maximum number of groups that could use each tp_size (e.g., multiple groups of tp_size 1, 2, etc.)
+    num_groups_per_tp = 8  # Set this based on expected usage; here we assume up to 5 groups per tp_size
 
-    num_groups = len(tp_sizes)  # Each group corresponds to a tp_size
-
-    # Decision variables: Whether to use a specific tp_size
-    use_tp_size = [cp.Variable(boolean=True) for _ in range(num_groups)]
-
-    # Decision variables: Number of LoRA configurations for each (tp_size, rank)
+    # Initialize decision variables for each (tp_size, group) combination
+    use_tp_size = [[cp.Variable(boolean=True) for _ in range(num_groups_per_tp)] for _ in range(len(tp_sizes))]
     num_possible_ranks = len(possible_ranks)
-    num_loras = [[cp.Variable(integer=True) for _ in range(num_possible_ranks)] for _ in range(num_groups)]
+    num_loras = [[[
+        cp.Variable(integer=True) for _ in range(num_possible_ranks)
+    ] for _ in range(num_groups_per_tp)] for _ in range(len(tp_sizes))]
 
-    # Constraints
+    # Constraints list
     constraints = []
 
     # Constraint: Total GPUs used cannot exceed total_gpus
-    total_gpus_used = cp.sum([tp_sizes[i] * use_tp_size[i] for i in range(num_groups)])
+    total_gpus_used = cp.sum([tp_sizes[i] * cp.sum(use_tp_size[i]) for i in range(len(tp_sizes))])
     constraints.append(total_gpus_used <= total_gpus)
 
     # Constraint: If tp_size is not used, num_loras must be zero
-    for i in range(num_groups):
-        for k in range(num_possible_ranks):
-            constraints.append(num_loras[i][k] >= 0)
-            constraints.append(num_loras[i][k] <= lora_rank_limits.get(possible_ranks[k], total_gpus))  # Apply rank limits
-            constraints.append(num_loras[i][k] <= total_gpus * use_tp_size[i])
+    for i in range(len(tp_sizes)):
+        for j in range(num_groups_per_tp):
+            for k in range(num_possible_ranks):
+                constraints.append(num_loras[i][j][k] >= 0)
+                constraints.append(num_loras[i][j][k] <= lora_rank_limits.get(possible_ranks[k], total_gpus))  # Apply rank limits
+                constraints.append(num_loras[i][j][k] <= total_gpus * use_tp_size[i][j])
 
     # Precompute memory requirements for each configuration
-    param_memory = np.zeros((num_groups, num_possible_ranks))
-    act_memory = np.zeros((num_groups, num_possible_ranks))
+    param_memory = np.zeros((len(tp_sizes), num_groups_per_tp, num_possible_ranks))
+    act_memory = np.zeros((len(tp_sizes), num_groups_per_tp, num_possible_ranks))
 
-    for i in range(num_groups):
+    for i in range(len(tp_sizes)):
         tp = tp_sizes[i]
         reciprocal = 1.0 / tp
-        for k, rank in enumerate(possible_ranks):
-            # Parameter Memory (MB)
-            mem = n_layers * (16 * h_attn * rank + 12 * m_mlp * rank) * reciprocal / (pp_size * 1024 ** 2)
-            param_memory[i][k] = mem
+        for j in range(num_groups_per_tp):
+            for k, rank in enumerate(possible_ranks):
+                # Parameter Memory (MB)
+                mem = n_layers * (16 * h_attn * rank + 12 * m_mlp * rank) * reciprocal / (pp_size * 1024 ** 2)
+                param_memory[i][j][k] = mem
 
-            # Activation Memory (MB)
-            mem_act = (b * s * (h_attn + m_mlp) * rank) * reciprocal / (pp_size * 1024 ** 2)
-            act_memory[i][k] = mem_act
+                # Activation Memory (MB)
+                mem_act = (b * s * (h_attn + m_mlp) * rank) * reciprocal / (pp_size * 1024 ** 2)
+                act_memory[i][j][k] = mem_act
 
     # LoRA Optimizer and Gradient Memory (MB) - AdamW optimizer
     optimizer_factor = 2.0  # AdamW requires two buffers (m, v) per parameter
@@ -302,33 +304,38 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
     ]
 
     # Convert precomputed memory into CVXPY expressions using hstack for broadcasting
-    param_memory_expr = [cp.hstack(param_memory[i]) for i in range(num_groups)]
-    act_memory_expr = [cp.hstack(act_memory[i]) for i in range(num_groups)]
-    grad_memory_expr = [cp.hstack(grad_memory[i]) for i in range(num_groups)]
-    opt_memory_expr = [cp.hstack(opt_memory[i]) for i in range(num_groups)]
-    num_loras_expr = [cp.hstack(num_loras[i]) for i in range(num_groups)]
+    param_memory_expr = [[cp.hstack(param_memory[i][j]) for j in range(num_groups_per_tp)] for i in range(len(tp_sizes))]
+    act_memory_expr = [[cp.hstack(act_memory[i][j]) for j in range(num_groups_per_tp)] for i in range(len(tp_sizes))]
+    grad_memory_expr = [[cp.hstack(grad_memory[i][j]) for j in range(num_groups_per_tp)] for i in range(len(tp_sizes))]
+    opt_memory_expr = [[cp.hstack(opt_memory[i][j]) for j in range(num_groups_per_tp)] for i in range(len(tp_sizes))]
+    num_loras_expr = [[cp.hstack(num_loras[i][j]) for j in range(num_groups_per_tp)] for i in range(len(tp_sizes))]
 
     # Total memory per group
     total_memory_per_group = []
-    for i in range(num_groups):
-        # Sum over all ranks
-        total_param_mem = cp.sum(cp.multiply(param_memory_expr[i], num_loras_expr[i]))
-        total_act_mem = cp.sum(cp.multiply(act_memory_expr[i], num_loras_expr[i]))
-        total_grad_mem = cp.sum(cp.multiply(grad_memory_expr[i], num_loras_expr[i]))
-        total_opt_mem = cp.sum(cp.multiply(opt_memory_expr[i], num_loras_expr[i]))
+    for i in range(len(tp_sizes)):
+        for j in range(num_groups_per_tp):
+            # Sum over all ranks
+            total_param_mem = cp.sum(cp.multiply(param_memory_expr[i][j], num_loras_expr[i][j]))
+            total_act_mem = cp.sum(cp.multiply(act_memory_expr[i][j], num_loras_expr[i][j]))
+            total_grad_mem = cp.sum(cp.multiply(grad_memory_expr[i][j], num_loras_expr[i][j]))
+            total_opt_mem = cp.sum(cp.multiply(opt_memory_expr[i][j], num_loras_expr[i][j]))
 
-        # Adjust for sharding based on FSDP level (simplified here)
-        total_group_mem = total_param_mem + total_act_mem + total_grad_mem + total_opt_mem
-        total_memory_per_group.append(total_group_mem)
+            # Adjust for sharding based on FSDP level (simplified here)
+            total_group_mem = total_param_mem + total_act_mem + total_grad_mem + total_opt_mem
+            total_memory_per_group.append(total_group_mem)
+
+            # Per-group memory constraint based on tp_size and per_gpu_memory
+            group_memory_limit = tp_sizes[i] * gpu_memory - base_weights_memory - base_activations_memory - frag_memory * tp_sizes[i]
+            constraints.append(total_group_mem <= group_memory_limit * use_tp_size[i][j])
 
     # Total LoRA memory
     total_lora_memory = cp.sum(total_memory_per_group)
 
     # Total base model memory (scaled)
-    base_total_memory = (base_weights_memory + base_activations_memory) * scale_factor
+    base_total_memory = base_weights_memory + base_activations_memory
 
     # Free GPU memory
-    free_memory = gpu_memory - (base_total_memory + frag_memory)
+    free_memory = gpu_memory * total_gpus - (base_total_memory + frag_memory * total_gpus)
     print(f"Free GPU memory is {free_memory}")
 
     # Memory constraint
@@ -347,17 +354,18 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
     result = prob.solve(solver=cp.GUROBI)  # Use a mixed-integer solver
 
     # Output the results
-    for i in range(num_groups):
-        if use_tp_size[i].value > 0.5:
-            print(f"Group with tp_size {tp_sizes[i]}:")
-            lora_ranks = []
-            lora_counts = []
-            for k in range(num_possible_ranks):
-                count = int(num_loras[i][k].value)
-                if count > 0:
-                    lora_ranks.append(possible_ranks[k])
-                    lora_counts.append(count)
-            print(f"  LoRA ranks and counts: {list(zip(lora_ranks, lora_counts))}")
+    for i in range(len(tp_sizes)):
+        for j in range(num_groups_per_tp):
+            if use_tp_size[i][j].value > 0.5:
+                print(f"Group with tp_size {tp_sizes[i]}:")
+                lora_ranks = []
+                lora_counts = []
+                for k in range(num_possible_ranks):
+                    count = int(num_loras[i][j][k].value)
+                    if count > 0:
+                        lora_ranks.append(possible_ranks[k])
+                        lora_counts.append(count)
+                print(f"  LoRA ranks and counts: {list(zip(lora_ranks, lora_counts))}")
     print(f"Optimal total memory used: {result / 1024:.2f} GB")
     if fsdp_level is None:
         fsdp_level_value = int(fsdp_level_var.value)
@@ -365,7 +373,7 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
     else:
         fsdp_level_value = fsdp_level_var
         print(f"Fixed FSDP Level: {fsdp_level_value}")
-    return None, None, fsdp_level_value, result
+    return
 
 
 
@@ -378,8 +386,12 @@ def update_nested_yaml_with_lora_config(yaml_file_path, gpus_per_config, r_lora_
     if 'model' in yaml_data:
         model_config = yaml_data['model']
 
-        # Update the lora_rank with the corresponding r_lora values
-        model_config['lora_rank'] = list(map(int, r_lora_values))  # Update LoRA ranks
+        # Check if r_lora_values is not None
+        if r_lora_values is not None:
+            # Update the lora_rank with the corresponding r_lora values
+            model_config['lora_rank'] = list(map(int, r_lora_values))  # Update LoRA ranks
+        else:
+            print("Warning: r_lora_values is None, skipping lora_rank update.")
         
         # Optionally, if you want to set gpus_per_config here or elsewhere in the YAML
         model_config['gpus_per_config'] = int(gpus_per_config)  # Update gpus_per_config
@@ -413,7 +425,7 @@ def parse_args():
 if __name__ == "__main__":
     # Parse command-line arguments
     args = parse_args()
-    yaml_file_path = "../../recipes/configs/llama3/8B_lora.yaml"
+    yaml_file_path = "/home/ubuntu/torchtune/recipes/configs/llama3/8B_lora_copy.yaml"
 
     # Parse the lora_rank_limits argument as a dictionary
     lora_rank_limits = json.loads(args.lora_rank_limits)
