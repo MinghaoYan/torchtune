@@ -1,3 +1,9 @@
+
+
+Share
+
+
+You said:
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -75,22 +81,22 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         - FSDP. Supported using PyTorch's FSDP APIs. DDP is currently not supported. Traning on CPU is not
             supported.
 
-        - Activation Checkpointing. This can be controlled using the ``activation_checkpointing``
+        - Activation Checkpointing. This can be controlled using the `activation_checkpointing
             flag. Activation checkpointing helps reduce the memory footprint since we no longer keep
             activations in memory and instead recompute them during the backward pass. This is especially
             helpful for larger batch sizes when you're memory constrained. But these savings in memory
             come at the cost of training performance. In most cases training can slow-down quite a bit as
             a result of this activation recomputation.
 
-        - Precision. Full fp32 and bf16 training are supported. Precision is controlled using the ``dtype``
-            flag. When ``dtype=bf16``, all activations, gradients and optimizer states are in bfloat16. In
+        - Precision. Full fp32 and bf16 training are supported. Precision is controlled using the `dtype
+            flag. When `dtype=bf16, all activations, gradients and optimizer states are in bfloat16. In
             most cases this should halve the memory footprint of full precision (fp32) training, without
             loss in model quality (will depend on the model, training data and other settings). For
             GPUs which do not support bfloat16, we fall back to fp32. Mixed precision training and fp16
             precision are currently not supported.
 
         - Gradient Accumulation. You can simulate larger batch sizes by accumulating gradients. This is
-            controlled using the ``gradient_accumulation_steps`` flag.
+            controlled using the `gradient_accumulation_steps flag.
 
                 Total Batch Size = batch_size * number of GPUs * gradient accumulation steps.
 
@@ -109,7 +115,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
             Optimizer State and recipe state (seed, total_epochs, number of epochs run etc) are
             only saved at the end of a given epoch and used in case of resuming training. Resuming
-            training is controlled by the ``resume_from_checkpoint`` flag. Mid-epoch checkpointing is
+            training is controlled by the `resume_from_checkpoint flag. Mid-epoch checkpointing is
             currently not supported.
 
             For more details on the checkpointer, please take a look at
@@ -117,16 +123,16 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         - Logging. Terminal, Disk, WandB and TensorBoard are all supported.
 
-    For a full list of example configs for this recipe, run ``tune ls`` on the command line. Each config
+    For a full list of example configs for this recipe, run `tune ls on the command line. Each config
     has example commands for how to kick-off training.
 
     Args:
         cfg (DictConfig): OmegaConf object parsed from yaml file
 
     Raises:
-        ValueError: If ``dtype`` is set to fp16.
+        ValueError: If `dtype is set to fp16.
         ValueError: If world_size is 1
-        RuntimeError: If ``dtype`` is set to bf16 and the hardware does not support bf16.
+        RuntimeError: If `dtype is set to bf16 and the hardware does not support bf16.
     """
 
     def __init__(self, cfg: DictConfig) -> None:
@@ -152,8 +158,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         # training attributes
         self._enable_activation_checkpointing = cfg.enable_activation_checkpointing
 
-        # These attributes constitute the recipe state and are updated by ``load_checkpoint``
-        # when ``resume_from_checkpoint`` is ``True``
+        # These attributes constitute the recipe state and are updated by `load_checkpoint
+        # when `resume_from_checkpoint is True
         self.seed = utils.set_seed(seed=cfg.seed)
         self.epochs_run = 0
         self.total_epochs = cfg.epochs
@@ -187,7 +193,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         checkpoint_dict = self._checkpointer.load_checkpoint()
 
         # When resuming from checkpoint for LoRA, the recipe expects the adapter weights
-        # and recipe state to be present. The keys should match up with what ``save_checkpoint``
+        # and recipe state to be present. The keys should match up with what `save_checkpoint
         # used to create these intermediate checkpoints
         if self._resume_from_checkpoint:
             if utils.ADAPTER_KEY not in checkpoint_dict:
@@ -348,25 +354,25 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             optimizer=self._optimizer2,
         )
 
-        # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
-        # if cfg is missing profiler key or if `cfg.profiler.enabled = False`
+        # Set up profiler, returns DummyProfiler (nullcontext object with no-op step method)
+        # if cfg is missing profiler key or if cfg.profiler.enabled = False
         self._profiler = self._setup_profiler(cfg.get(PROFILER_KEY, None))
 
     def _setup_profiler(
         self, cfg_profiler: DictConfig
     ) -> Union[torch.profiler.profile, DummyProfiler]:
         """
-        Parses the `profiler` section of top-level `cfg` and sets up profiler
+        Parses the profiler section of top-level cfg and sets up profiler
 
         Args:
-            cfg_profiler: DictConfig - `profiler` section of the top-level `cfg` (the main config passed to `recipe.main`)
+            cfg_profiler: DictConfig - profiler section of the top-level cfg (the main config passed to recipe.main)
 
         Returns:
             profiler: Union[torch.profiler.profile, DummyProfiler] - DummyProfiler is a nullcontext with no-op methods
-            for `start`, `stop`, and `step` that can be used in place of `torch.profiler.profile` if profiler is not enabled such
+            for start, stop, and step that can be used in place of torch.profiler.profile if profiler is not enabled such
             that the instrumented training loop does not need to be changed profiling is disabled.
 
-        The profiler config can be provided in configs under the `profiler` key with the following layout:
+        The profiler config can be provided in configs under the profiler key with the following layout:
 
         .. code-block:: yaml
             profiler:
@@ -375,7 +381,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 #Output directory of trace artifacts
                 output_dir: str
 
-            #`torch.profiler.ProfilerActivity` types to trace
+            #torch.profiler.ProfilerActivity types to trace
             cpu: bool
             cuda: bool
 
@@ -385,7 +391,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 record_shapes: bool
                 with_flops: bool
 
-            # `torch.profiler.schedule` options:
+            # torch.profiler.schedule options:
             # wait_steps -> wait, warmup_steps -> warmup, active_steps -> active, num_cycles -> repeat
             wait_steps: int
             warmup_steps: int
@@ -403,7 +409,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             assert (
                 cfg_profiler.get("_component_")
                 == "torchtune.utils.setup_torch_profiler"
-            ), "Only torch profiler supported currently: component must be `torchtune.utils.setup_torch_profiler`"
+            ), "Only torch profiler supported currently: component must be torchtune.utils.setup_torch_profiler"
 
         profiler, profiler_cfg = config.instantiate(cfg_profiler)
 
@@ -525,13 +531,13 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         """
         Model initialization has some important considerations:
            a. To minimize GPU peak memory, we load the model on CPU with the right
-              dtype. To ensure that we don't instantiate ``world_size`` number of models,
+              dtype. To ensure that we don't instantiate `world_size number of models,
               we initialize on meta_device for all ranks other than rank 0.
-           b. Rank 0 is also responsible for calling ``load_state_dict`` and loading the
+           b. Rank 0 is also responsible for calling `load_state_dict and loading the
               model weights from checkpoint.
-           c. While wrapping the model with FSDP, we set ``sync_module_states``
+           c. While wrapping the model with FSDP, we set `sync_module_states
               to TRUE and broadcast module params and buffers from rank 0.
-           d. The ``device_id`` param ensures that the FSDP initialization happens on
+           d. The `device_id param ensures that the FSDP initialization happens on
               the correct device.
         """
 
@@ -903,7 +909,7 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 )
 
                 # num_loras = 
-                # Repeat the tokens `num_ranks` times along the batch dimension (dim=0)
+                # Repeat the tokens num_ranks times along the batch dimension (dim=0)
                 # if tokens.shape is (bsz, s), it will become (num_ranks * bsz, s)
                 print(f"token shape is {tokens.shape}")
                 tokens_repeated = tokens.repeat(self.num_adapters, 1)
@@ -1094,7 +1100,7 @@ def recipe_main(cfg: DictConfig) -> None:
     Entry point for the recipe.
 
     Configurable parameters are read in the following order:
-        - Parameters specified in config (see available configs through ``tune ls``)
+        - Parameters specified in config (see available configs through `tune ls)
         - Overwritten by arguments from the command-line
     """
     if not utils.is_distributed():
