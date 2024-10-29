@@ -363,11 +363,15 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         bsz = x.shape[0] // len(self.rank)
         # print(f"x.shape[0] is { x.shape[0] }, len self rank is {len(self.rank)}, bsz is {bsz}")
         # Gather the full weight matrices for lora_a and lora_b across all ranks
-        gathered_lora_a_weight = self.all_gather_lora_weight(self.lora_a)
-        gathered_lora_b_weight = self.all_gather_lora_weight(self.lora_b)
+        if torch.distributed.is_initialized():
+            gathered_lora_a_weight = self.all_gather_lora_weight(self.lora_a)
+            gathered_lora_b_weight = self.all_gather_lora_weight(self.lora_b)
 
-        gathered_lora_a_weight = gathered_lora_a_weight.view(self.lora_a.out_features, self.lora_a.in_features).to(x.dtype)
-        gathered_lora_b_weight = gathered_lora_b_weight.view(self.lora_b.out_features, self.lora_b.in_features).to(x.dtype)
+            gathered_lora_a_weight = gathered_lora_a_weight.view(self.lora_a.out_features, self.lora_a.in_features).to(x.dtype)
+            gathered_lora_b_weight = gathered_lora_b_weight.view(self.lora_b.out_features, self.lora_b.in_features).to(x.dtype)
+        else:
+            gathered_lora_a_weight = self.lora_a.weight
+            gathered_lora_b_weight = self.lora_b.weight
 
 
         lora_outs = []  # List to store per-LoRA outputs

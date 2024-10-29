@@ -254,12 +254,15 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
     total_gpus_used = cp.sum([tp_sizes[i] * cp.sum(use_tp_size[i]) for i in range(len(tp_sizes))])
     constraints.append(total_gpus_used <= total_gpus)
 
+    for k in possible_ranks:
+        print(f"rank {k} is {lora_rank_limits.get(str(k))}")
+
     # Constraint: If tp_size is not used, num_loras must be zero
     for i in range(len(tp_sizes)):
         for j in range(num_groups_per_tp):
             for k in range(num_possible_ranks):
                 constraints.append(num_loras[i][j][k] >= 0)
-                constraints.append(num_loras[i][j][k] <= lora_rank_limits.get(possible_ranks[k], total_gpus))  # Apply rank limits
+                constraints.append(num_loras[i][j][k] <= lora_rank_limits.get(str(possible_ranks[k]), 0))  # Apply rank limits
                 constraints.append(num_loras[i][j][k] <= total_gpus * use_tp_size[i][j])
 
     # Precompute memory requirements for each configuration
@@ -353,19 +356,39 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
     # Solve the problem
     result = prob.solve(solver=cp.GUROBI)  # Use a mixed-integer solver
 
-    # Output the results
+    # Iterate through each tp_size and its groups
+    yaml_file_path = "/home/ubuntu/torchtune/recipes/configs/llama3/8B_lora_copy.yaml"
     for i in range(len(tp_sizes)):
         for j in range(num_groups_per_tp):
             if use_tp_size[i][j].value > 0.5:
-                print(f"Group with tp_size {tp_sizes[i]}:")
-                lora_ranks = []
-                lora_counts = []
+                # Expand the LoRA ranks for the current group as a compact list
+                expanded_lora_ranks = []
                 for k in range(num_possible_ranks):
                     count = int(num_loras[i][j][k].value)
-                    if count > 0:
-                        lora_ranks.append(possible_ranks[k])
-                        lora_counts.append(count)
-                print(f"  LoRA ranks and counts: {list(zip(lora_ranks, lora_counts))}")
+                    expanded_lora_ranks.extend([possible_ranks[k]] * count)
+
+                # Set lora_alpha to a list of 16s matching the length of expanded_lora_ranks
+                lora_alpha = [16] * len(expanded_lora_ranks)
+
+                # Set up the path for each separate YAML file for each tp_size and group index
+                group_yaml_file_path = f"{yaml_file_path.rstrip('.yaml')}_tp_{tp_sizes[i]}_group_{j}.yaml"
+                
+                # Load the existing YAML data
+                with open(yaml_file_path, 'r') as file:
+                    yaml_data = yaml.safe_load(file)
+                    
+                # Update the LoRA configuration within the YAML
+                if 'model' in yaml_data:
+                    model_config = yaml_data['model']
+                    model_config['lora_rank'] = expanded_lora_ranks
+                    model_config['lora_alpha'] = lora_alpha
+                    model_config['gpus_per_config'] = int(tp_sizes[i])
+                
+                # Save the updated YAML data to a new file
+                with open(group_yaml_file_path, 'w') as file:
+                    yaml.dump(yaml_data, file, default_flow_style=None, width=1000)
+
+                print(f"Updated YAML file '{group_yaml_file_path}' with expanded lora_rank values: {expanded_lora_ranks}")
     print(f"Optimal total memory used: {result / 1024:.2f} GB")
     if fsdp_level is None:
         fsdp_level_value = int(fsdp_level_var.value)
@@ -375,32 +398,6 @@ def solve_lora_optimization(n_layers, h_attn, m_mlp, b, s, total_gpus, gpu_memor
         print(f"Fixed FSDP Level: {fsdp_level_value}")
     return
 
-
-
-def update_nested_yaml_with_lora_config(yaml_file_path, gpus_per_config, r_lora_values):
-    # Open and read the existing YAML file
-    with open(yaml_file_path, 'r') as file:
-        yaml_data = yaml.safe_load(file)
-
-    # Navigate to the 'model' section and update the 'lora_rank' field
-    if 'model' in yaml_data:
-        model_config = yaml_data['model']
-
-        # Check if r_lora_values is not None
-        if r_lora_values is not None:
-            # Update the lora_rank with the corresponding r_lora values
-            model_config['lora_rank'] = list(map(int, r_lora_values))  # Update LoRA ranks
-        else:
-            print("Warning: r_lora_values is None, skipping lora_rank update.")
-        
-        # Optionally, if you want to set gpus_per_config here or elsewhere in the YAML
-        model_config['gpus_per_config'] = int(gpus_per_config)  # Update gpus_per_config
-
-    # Write the updated YAML data back to the file
-    with open(yaml_file_path, 'w') as file:
-        yaml.dump(yaml_data, file)
-
-    print(f"Updated YAML file '{yaml_file_path}' with new gpus_per_config and lora_rank values.")
 
 
 # Command-line argument parsing
@@ -425,13 +422,12 @@ def parse_args():
 if __name__ == "__main__":
     # Parse command-line arguments
     args = parse_args()
-    yaml_file_path = "/home/ubuntu/torchtune/recipes/configs/llama3/8B_lora_copy.yaml"
 
     # Parse the lora_rank_limits argument as a dictionary
     lora_rank_limits = json.loads(args.lora_rank_limits)
 
     # Call the function with the parsed arguments
-    lora_configs, fsdp_level, gpu_config, result = solve_lora_optimization(
+    solve_lora_optimization(
         n_layers=args.n_layers,
         h_attn=args.h_attn,
         m_mlp=args.m_mlp,
@@ -446,6 +442,6 @@ if __name__ == "__main__":
         fsdp_level=args.fsdp_level  # Optional, if not provided, we optimize it
     )
 
-    update_nested_yaml_with_lora_config(yaml_file_path, gpu_config, lora_configs)
+    # update_nested_yaml_with_lora_config(yaml_file_path, gpu_config, lora_configs)
 
 

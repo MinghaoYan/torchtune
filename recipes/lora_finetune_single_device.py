@@ -132,6 +132,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
+        self.num_adapters = len(cfg.model.lora_rank)
+
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
         Extract the checkpoint state from file and validate. This includes the
@@ -520,109 +522,317 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             intermediate_checkpoint=(epoch + 1 < self.total_epochs),
         )
 
+    # def train(self) -> None:
+    #     """
+    #     The core training loop.
+    #     """
+# 
+        # if self._model_compile:
+        #     log.info(
+        #         "NOTE: torch.compile is enabled and model is compiled in first forward. Expect a relatively slow first iteration."
+        #     )
+
+        # # Initialize tokens count and running loss (for grad accumulation)
+        # t0 = time.perf_counter()
+        # running_loss = 0
+        # num_tokens = 0
+
+        # with self._profiler as prof:
+        #     # self.epochs_run should be non-zero when we're resuming from a checkpoint
+        #     for curr_epoch in range(self.epochs_run, self.total_epochs):
+        #         # Update the sampler to ensure data is correctly shuffled across epochs
+        #         # in case shuffle is True
+        #         self._sampler.set_epoch(curr_epoch)
+
+        #         pbar = tqdm(total=self._steps_per_epoch)
+        #         for idx, batch in enumerate(self._dataloader):
+        #             if (
+        #                 self.max_steps_per_epoch is not None
+        #                 and (idx // self._gradient_accumulation_steps)
+        #                 == self.max_steps_per_epoch
+        #             ):
+        #                 break
+
+        #             # Both are shape [b, s]
+        #             tokens, labels = batch["tokens"], batch["labels"]
+        #             # Get the attention mask and position ids from the dataset if they
+        #             # exist. Currently, only sample packing in PackedDataset returns these
+        #             mask = batch.get("mask", None)  # shape [b, s, s]
+        #             input_pos = batch.get("input_pos", None)  # shape [b, s]
+
+        #             tokens = tokens.to(self._device)
+        #             num_tokens += tokens.numel()
+        #             labels = labels.to(self._device)
+        #             mask = mask.to(self._device) if mask is not None else None
+        #             input_pos = (
+        #                 input_pos.to(self._device) if input_pos is not None else None
+        #             )
+
+        #             logits = self._model(tokens, mask=mask, input_pos=input_pos)
+        #             # Shift so that tokens < n predict n
+        #             logits = logits[..., :-1, :].contiguous()
+        #             labels = labels[..., 1:].contiguous()
+        #             logits = logits.transpose(1, 2)
+        #             # Compute loss
+        #             loss = self._loss_fn(logits, labels)
+        #             loss = loss / self._gradient_accumulation_steps
+        #             running_loss += loss
+        #             loss.backward()
+
+        #             # Step with optimizer
+        #             if (idx + 1) % self._gradient_accumulation_steps == 0:
+        #                 self._optimizer.step()
+        #                 self._optimizer.zero_grad(set_to_none=True)
+        #                 self._lr_scheduler.step()
+        #                 # Update the number of steps when the weights are updated
+        #                 self.global_step += 1
+
+        #                 loss_to_log = running_loss.item()
+        #                 pbar.update(1)
+        #                 pbar.set_description(
+        #                     f"{curr_epoch+1}|{self.global_step}|Loss: {loss_to_log}"
+        #                 )
+
+        #                 # Log per-step metrics
+        #                 if self.global_step % self._log_every_n_steps == 0:
+        #                     time_per_step = time.perf_counter() - t0
+        #                     log_dict = {
+        #                         "loss": loss_to_log,
+        #                         "lr": self._optimizer.param_groups[0]["lr"],
+        #                         "tokens_per_second_per_gpu": num_tokens / time_per_step,
+        #                     }
+        #                     if (
+        #                         self._device.type == "cuda"
+        #                         and self._log_peak_memory_stats
+        #                     ):
+        #                         log_dict.update(
+        #                             utils.get_memory_stats(device=self._device)
+        #                         )
+        #                     self._metric_logger.log_dict(
+        #                         log_dict,
+        #                         step=self.global_step,
+        #                     )
+
+        #                 # Reset running stats for the next step
+        #                 running_loss = 0
+        #                 num_tokens = 0
+        #                 t0 = time.perf_counter()
+
+        #             # Step the profiler
+        #             # Note we are stepping each batch, which might not include optimizer step in the trace
+        #             # if the schedule cycle doesn't align with gradient accumulation.
+        #             prof.step()
+
+        #         self.epochs_run += 1
+        #         self.save_checkpoint(epoch=curr_epoch)
+
     def train(self) -> None:
         """
         The core training loop.
         """
+        # clean up before training begins
+        utils.cleanup_before_training()
 
-        if self._model_compile:
-            log.info(
-                "NOTE: torch.compile is enabled and model is compiled in first forward. Expect a relatively slow first iteration."
-            )
+        # _, rank = utils.get_world_size_and_rank()
+
+        # zero out the gradients before starting training
+        self._optimizer.zero_grad(set_to_none=True)
+        # self._optimizer2.zero_grad()
 
         # Initialize tokens count and running loss (for grad accumulation)
         t0 = time.perf_counter()
         running_loss = 0
         num_tokens = 0
 
-        with self._profiler as prof:
-            # self.epochs_run should be non-zero when we're resuming from a checkpoint
-            for curr_epoch in range(self.epochs_run, self.total_epochs):
-                # Update the sampler to ensure data is correctly shuffled across epochs
-                # in case shuffle is True
-                self._sampler.set_epoch(curr_epoch)
+        # Collect all LoRA modules in the model
+        lora_modules = []
+        for module in self._model.modules():
+            if hasattr(module, 'lora_a') and hasattr(module, 'lora_b'):
+                lora_modules.append(module)
 
-                pbar = tqdm(total=self._steps_per_epoch)
-                for idx, batch in enumerate(self._dataloader):
-                    if (
-                        self.max_steps_per_epoch is not None
-                        and (idx // self._gradient_accumulation_steps)
-                        == self.max_steps_per_epoch
-                    ):
-                        break
+        # Initialize optimizer with all LoRA parameters
+        lora_parameters = []
+        for module in lora_modules:
+            lora_parameters.extend([module.lora_a.weight, module.lora_b.weight])
 
-                    # Both are shape [b, s]
-                    tokens, labels = batch["tokens"], batch["labels"]
-                    # Get the attention mask and position ids from the dataset if they
-                    # exist. Currently, only sample packing in PackedDataset returns these
-                    mask = batch.get("mask", None)  # shape [b, s, s]
-                    input_pos = batch.get("input_pos", None)  # shape [b, s]
+        self._profiler.start()
 
-                    tokens = tokens.to(self._device)
-                    num_tokens += tokens.numel()
-                    labels = labels.to(self._device)
-                    mask = mask.to(self._device) if mask is not None else None
-                    input_pos = (
-                        input_pos.to(self._device) if input_pos is not None else None
+        # if self._is_rank_zero:
+        #     self.print_memory_usage()
+        # self.epochs_run should be non-zero when we're resuming from a checkpoint
+        for curr_epoch in range(self.epochs_run, self.total_epochs):
+
+            # Update the sampler to ensure data is correctly shuffled across epochs
+            # in case shuffle is True
+            self._sampler.set_epoch(curr_epoch)
+
+            pbar = tqdm(total=self._steps_per_epoch)
+            for idx, batch in enumerate(self._dataloader):
+                if (
+                    self.max_steps_per_epoch is not None
+                    and (idx // self._gradient_accumulation_steps)
+                    == self.max_steps_per_epoch
+                ):
+                    break
+
+                # Both are shape [b, s]
+                tokens, labels = batch["tokens"], batch["labels"]
+                # Get the attention mask and position ids from the dataset if they
+                # exist. Currently, only sample packing in PackedDataset returns these
+                mask = batch.get("mask", None)  # shape [b, s, s]
+                input_pos = batch.get("input_pos", None)  # shape [b, s]
+
+                tokens = tokens.to(self._device)
+                num_tokens += tokens.numel()
+                labels = labels.to(self._device)
+                mask = mask.to(self._device) if mask is not None else None
+                input_pos = (
+                    input_pos.to(self._device) if input_pos is not None else None
+                )
+
+                # num_loras = 
+                # Repeat the tokens `num_ranks` times along the batch dimension (dim=0)
+                # if tokens.shape is (bsz, s), it will become (num_ranks * bsz, s)
+                print(f"token shape is {tokens.shape}")
+                tokens_repeated = tokens.repeat(self.num_adapters, 1)
+                print(f"token repeat shape is {tokens_repeated.shape}")
+
+                # Similarly, repeat labels, mask, and input_pos if required
+                labels_repeated = labels.repeat(self.num_adapters, 1)
+
+                mask_repeated = mask.repeat(self.num_adapters, 1) if mask is not None else None
+                input_pos_repeated = input_pos.repeat(self.num_adapters, 1) if input_pos is not None else None
+
+                # Initialize accumulators for gradients for this batch
+                accum_lora_a_grads = {module: torch.zeros_like(module.lora_a.weight) for module in lora_modules}
+                accum_lora_b_grads = {module: torch.zeros_like(module.lora_b.weight) for module in lora_modules}
+
+
+                logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
+                # Shift so that tokens < n predict n
+                logits = logits[..., :-1, :].contiguous()
+                labels_shifted = labels_repeated[..., 1:].contiguous()
+                logits = logits.transpose(1, 2)
+
+                bsz = self._dataloader.batch_size
+
+                # Loop over each LoRA adapter index 'i'
+                for i in range(self.num_adapters):
+                    # Recompute forward pass for current LoRA adapter to avoid retain_graph
+                    # logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
+                    # logits = logits[..., :-1, :].contiguous()
+                    # labels_shifted = labels_repeated[..., 1:].contiguous()
+                    # logits = logits.transpose(1, 2)
+
+                    lora_output = logits[i * bsz:(i + 1) * bsz, ...]
+                    lora_labels = labels_shifted[i * bsz:(i + 1) * bsz, ...]
+
+                    # Compute loss
+                    # logits = lora_output[..., :-1, :].contiguous()
+                    # logits = logits.transpose(1, 2)
+                    loss = self._loss_fn(lora_output, lora_labels)
+                    loss = loss / self._gradient_accumulation_steps
+                    running_loss += loss.item()
+
+                    # Compute gradients w.r.t. all LoRA parameters
+                    lora_params = []
+                    for module in lora_modules:
+                        lora_params.extend([module.lora_a.weight, module.lora_b.weight])
+
+                    print(f"loss is {loss}")
+
+                    grads = torch.autograd.grad(
+                        loss,
+                        lora_params,
+                        retain_graph=True,  # No need to retain graph as we recomputed forward pass
+                        create_graph=False,
+                    )
+                    for idx, item in enumerate(grads):
+                        if item.shape != lora_params[idx].shape:
+                            print(f"idx {idx} shape not equal, param shape is {lora_params[idx].shape}, grads shape is {item.shape}")
+
+                    # Process gradients for each module
+                    grad_idx = 0
+                    for module in lora_modules:
+
+                        # Get gradients and reshape
+                        lora_a_grad = grads[grad_idx].view(module.lora_a.out_features, module.lora_a.in_features)
+                        grad_idx += 1
+                        lora_b_grad = grads[grad_idx].view(module.lora_b.out_features, module.lora_b.in_features)
+                        grad_idx += 1
+
+                        # Get start and end indices for the current LoRA adapter in this module
+                        start_idx = sum(module.rank[:i])
+                        end_idx = start_idx + module.rank[i]
+
+                        # Mask gradients for lora_a.weight
+                        mask_a = torch.zeros_like(lora_a_grad)
+                        mask_a[start_idx:end_idx, :] = 1
+                        lora_a_grad = lora_a_grad * mask_a
+
+                        # Mask gradients for lora_b.weight
+                        mask_b = torch.zeros_like(lora_b_grad)
+                        mask_b[:, start_idx:end_idx] = 1
+                        lora_b_grad = lora_b_grad * mask_b
+
+                        accum_lora_a_grads[module] += lora_a_grad
+                        accum_lora_b_grads[module] += lora_b_grad
+
+                # Assign accumulated gradients to parameter .grad attributes
+                for module in lora_modules:
+                    module.lora_a.weight.grad = accum_lora_a_grads[module]
+                    module.lora_b.weight.grad = accum_lora_b_grads[module]
+
+
+                
+                torch.cuda.empty_cache()
+
+                # Step with optimizer
+                if (idx + 1) % self._gradient_accumulation_steps == 0:
+                    self._optimizer.step()
+                    self._optimizer.zero_grad(set_to_none=True)
+                    self._lr_scheduler.step()
+
+                    # Update the number of steps when the weights are updated
+                    self.global_step += 1
+
+                    # loss_to_log = running_loss.item()
+                    pbar.update(1)
+                    pbar.set_description(
+                        f"{curr_epoch+1}|{self.global_step}|Loss: {running_loss}"
                     )
 
-                    logits = self._model(tokens, mask=mask, input_pos=input_pos)
-                    # Shift so that tokens < n predict n
-                    logits = logits[..., :-1, :].contiguous()
-                    labels = labels[..., 1:].contiguous()
-                    logits = logits.transpose(1, 2)
-                    # Compute loss
-                    loss = self._loss_fn(logits, labels)
-                    loss = loss / self._gradient_accumulation_steps
-                    running_loss += loss
-                    loss.backward()
-
-                    # Step with optimizer
-                    if (idx + 1) % self._gradient_accumulation_steps == 0:
-                        self._optimizer.step()
-                        self._optimizer.zero_grad(set_to_none=True)
-                        self._lr_scheduler.step()
-                        # Update the number of steps when the weights are updated
-                        self.global_step += 1
-
-                        loss_to_log = running_loss.item()
-                        pbar.update(1)
-                        pbar.set_description(
-                            f"{curr_epoch+1}|{self.global_step}|Loss: {loss_to_log}"
+                    # Log per-step metrics
+                    if (
+                        self.global_step % self._log_every_n_steps == 0
+                    ):
+                        time_per_step = time.perf_counter() - t0
+                        log_dict = {
+                            "loss": running_loss,
+                            "lr": self._optimizer.param_groups[0]["lr"],
+                            "tokens_per_second_per_gpu": num_tokens / time_per_step,
+                        }
+                        if self._log_peak_memory_stats:
+                            log_dict.update(utils.get_memory_stats(device=self._device))
+                        self._metric_logger.log_dict(
+                            log_dict,
+                            step=self.global_step,
                         )
 
-                        # Log per-step metrics
-                        if self.global_step % self._log_every_n_steps == 0:
-                            time_per_step = time.perf_counter() - t0
-                            log_dict = {
-                                "loss": loss_to_log,
-                                "lr": self._optimizer.param_groups[0]["lr"],
-                                "tokens_per_second_per_gpu": num_tokens / time_per_step,
-                            }
-                            if (
-                                self._device.type == "cuda"
-                                and self._log_peak_memory_stats
-                            ):
-                                log_dict.update(
-                                    utils.get_memory_stats(device=self._device)
-                                )
-                            self._metric_logger.log_dict(
-                                log_dict,
-                                step=self.global_step,
-                            )
+                    # Reset running stats for the next step
+                    running_loss = 0
+                    num_tokens = 0
+                    t0 = time.perf_counter()
 
-                        # Reset running stats for the next step
-                        running_loss = 0
-                        num_tokens = 0
-                        t0 = time.perf_counter()
+                    # Step profiler
+                    # Note that this is called within gradient accumulation block, hence
+                    # will include multiple forward / backward passes if gradient accumulation > 1
+                    self._profiler.step()
 
-                    # Step the profiler
-                    # Note we are stepping each batch, which might not include optimizer step in the trace
-                    # if the schedule cycle doesn't align with gradient accumulation.
-                    prof.step()
+            self.epochs_run += 1
+            self.save_checkpoint(epoch=curr_epoch)
 
-                self.epochs_run += 1
-                self.save_checkpoint(epoch=curr_epoch)
+        self._profiler.stop()
 
     def cleanup(self) -> None:
         self._metric_logger.close()
