@@ -171,13 +171,6 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         self.num_adapters = len(cfg.model.lora_rank)
 
-        # These are the queues for forward / backward / softmax passes that are yet to be executed
-        self.fwd_queue = Queue()
-        self.bwd_queue = Queue()
-        self.softmax_queue = Queue()
-
-        self.gather_handles = []
-
         # self.num_layers = num_layers
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:

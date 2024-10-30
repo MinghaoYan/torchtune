@@ -3,7 +3,7 @@ import sys
 import time
 
 from functools import partial
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 from warnings import warn
 
 import torch
@@ -12,6 +12,8 @@ from omegaconf import DictConfig, ListConfig
 from torch import nn
 from torch.distributed import destroy_process_group, init_process_group
 import torch.distributed.tensor.parallel as tp
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module, SequenceParallel
+from torch.distributed.tensor import Replicate, Shard
 from torch.distributed._tensor import DeviceMesh, distribute_module
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
@@ -37,7 +39,7 @@ import torch.distributed as dist
 log = utils.get_logger("DEBUG")
 
 
-class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
+class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
     """
     Distributed LoRA finetuning recipe for dense transformer-based LLMs such as Llama2.
     This recipe supports distributed training and can be run on a single node (1 to 8 GPUs).
@@ -76,6 +78,8 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
 
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
+
+        self.num_adapters = len(cfg.model.lora_rank)
 
     def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
@@ -289,9 +293,15 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
             )
 
             # Load base model weights
+            log.info(
+                f"Start loading model state dict"
+            )
             model.load_state_dict(base_model_state_dict, strict=False)
             if lora_weights_state_dict:
                 model.load_state_dict(lora_weights_state_dict, strict=False)
+            log.info(
+                f"Finish loading model state dict"
+            )
         else:
             # For non-zero ranks, load the model on meta device
             with utils.set_default_dtype(self._dtype), torch.device("meta"):
@@ -313,14 +323,56 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
         # Define the device mesh for tensor parallelism
         world_size = torch.distributed.get_world_size()
         device_ids = list(range(world_size))
-        device_mesh = DeviceMesh('cuda', device_ids)
+        self.device_mesh = DeviceMesh('cuda', device_ids)
 
-        # Distribute the model using distribute_module
-        model_tp = distribute_module(
+        # Define the Tensor Parallelism plan
+        layer_tp_plan = {
+            "attn.q_proj": ColwiseParallel(),
+            "attn.k_proj": ColwiseParallel(),
+            "attn.v_proj": ColwiseParallel(),
+            "attn.output_proj": RowwiseParallel(),
+            "mlp.w1": ColwiseParallel(),
+            "mlp.w2": RowwiseParallel(),
+            "mlp.w3": ColwiseParallel(),
+        }
+        
+        log.info(
+            f"Start parallelizing layers"
+        )
+
+        for _, transformer_block in enumerate(model.layers):
+            # Adjust attention module to use the local number of heads
+            attn_layer = transformer_block.attn
+            attn_layer.num_heads = attn_layer.num_heads // self.device_mesh.size()
+            attn_layer.num_kv_heads = attn_layer.num_kv_heads // self.device_mesh.size()
+
+            parallelize_module(
+                module=transformer_block,
+                device_mesh=self.device_mesh,
+                parallelize_plan=layer_tp_plan,
+            )
+
+
+        # Apply parallelization using the `parallelize_module` function
+        model_tp = parallelize_module(
             module=model,
-            device_mesh=device_mesh,
-            partition_method='tensor_parallel',
-            tp_mesh_dim=0,  # Assuming we use the first dimension for TP
+            device_mesh=self.device_mesh,
+            parallelize_plan= {
+                "tok_embeddings": RowwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Shard(1),
+                ),
+                "norm": SequenceParallel(),
+                "output": ColwiseParallel(
+                    input_layouts=Shard(1),
+                    # use DTensor as the output
+                    use_local_output=False,
+                ),
+            }
+        )
+
+        log.info(
+            f"Finish parallelizing module"
         )
 
         if enable_activation_checkpointing:
@@ -339,7 +391,12 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
     def _setup_optimizer(
         self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
     ) -> Optimizer:
-        optimizer = config.instantiate(cfg_optimizer, self.adapter_params)
+        # Assuming `self.adapter_params` is a list of parameters
+        # for idx, param in enumerate(self.adapter_params):
+        #     if not isinstance(param, (torch.Tensor, nn.Parameter)):
+        #         print(f"Non-tensor item found at index {idx}: {param} (type: {type(param)})")
+
+        optimizer = config.instantiate(cfg_optimizer, self._model.parameters())
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
         if self._is_rank_zero:
@@ -491,14 +548,14 @@ class LoRAFinetuneRecipeAsyncDistributed(FTRecipeInterface):
                 )
 
                 # Repeat inputs for all adapters
-                tokens_repeated = tokens.repeat(self.num_adapters, 1)
-                labels_repeated = labels.repeat(self.num_adapters, 1)
+                tokens_repeated = tokens.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
+                labels_repeated = labels.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
                 if mask is not None:
-                    mask_repeated = mask.repeat(self.num_adapters, 1, 1)
+                    mask_repeated = mask.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
                 else:
                     mask_repeated = None
                 if input_pos is not None:
-                    input_pos_repeated = input_pos.repeat(self.num_adapters, 1)
+                    input_pos_repeated = input_pos.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
                 else:
                     input_pos_repeated = None
 
@@ -617,9 +674,9 @@ def recipe_main(cfg: DictConfig) -> None:
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     init_process_group(backend="gloo" if cfg.device == "cpu" else "nccl")
 
-    config.log_config(recipe_name="LoRAFinetuneRecipeAsyncDistributed", cfg=cfg)
+    config.log_config(recipe_name="LoRAFinetuneRecipeTPDistributed", cfg=cfg)
 
-    recipe = LoRAFinetuneRecipeAsyncDistributed(cfg=cfg)
+    recipe = LoRAFinetuneRecipeTPDistributed(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
 

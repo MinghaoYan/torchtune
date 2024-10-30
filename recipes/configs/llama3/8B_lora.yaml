@@ -20,7 +20,7 @@
 # Tokenizer
 tokenizer:
   _component_: torchtune.models.llama3.llama3_tokenizer
-  path: /tmp/Meta-Llama-3-8B-Instruct/original/tokenizer.model
+  path: /home/ubuntu/Meta-Llama-3.1-8B-Instruct/original/tokenizer.model
 
 # Model Arguments
 model:
@@ -36,12 +36,12 @@ model:
 
 checkpointer:
   _component_: torchtune.utils.FullModelMetaCheckpointer
-  checkpoint_dir: /tmp/Meta-Llama-3-8B-Instruct/original/
+  checkpoint_dir: /home/ubuntu/Meta-Llama-3.1-8B-Instruct/original/
   checkpoint_files: [
     consolidated.00.pth
   ]
   recipe_checkpoint: null
-  output_dir: /tmp/Meta-Llama-3-8B-Instruct/
+  output_dir: /home/ubuntu/Meta-Llama-3.1-8B-Instruct/
   model_type: LLAMA3
 resume_from_checkpoint: False
 
@@ -71,7 +71,7 @@ gradient_accumulation_steps: 1
 compile: False
 
 # Logging
-output_dir: /tmp/lora_finetune_output
+output_dir: /home/ubuntu/lora_finetune_output
 metric_logger:
   _component_: torchtune.utils.metric_logging.DiskLogger
   log_dir: ${output_dir}
