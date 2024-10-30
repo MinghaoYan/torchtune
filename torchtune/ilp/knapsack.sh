@@ -1,0 +1,13 @@
+python ilp/knapsack.py \
+    --n_layers 32 \
+    --h_attn 4096 \
+    --m_mlp 14336 \
+    --b 4 \
+    --s 1024 \
+    --total_gpus 8 \
+    --gpu_memory 40960 \
+    --base_weights_memory 15258 \
+    --base_activations_memory 4608 \
+    --frag_memory 1024 \
+    --lora_rank_limits '{"16": 5, "32": 10, "64": 15, "128": 20, "256": 25, "512": 30}' \
+    --fsdp_level 3
