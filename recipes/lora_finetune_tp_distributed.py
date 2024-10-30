@@ -39,6 +39,20 @@ import torch.distributed as dist
 log = utils.get_logger("DEBUG")
 
 
+class CustomParallelStyle(ParallelStyle):
+    def __init__(self):
+        super().__init__()
+        # Define sharding strategies or layouts here
+
+    def _partition_fn(self, module, device_mesh):
+        # Define custom partitioning logic for module’s parameters
+        return
+
+    def _prepare_input_fn(self, mod, inputs, device_mesh):
+        # Define input sharding strategy here
+        return
+
+
 class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
     """
     Distributed LoRA finetuning recipe for dense transformer-based LLMs such as Llama2.
