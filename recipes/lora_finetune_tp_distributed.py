@@ -10,10 +10,11 @@ import torch
 from omegaconf import DictConfig, ListConfig
 
 from torch import nn
+from torch.nn import Parameter
 from torch.distributed import destroy_process_group, init_process_group
 import torch.distributed.tensor.parallel as tp
-from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module, SequenceParallel
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module, SequenceParallel, ParallelStyle
+from torch.distributed.tensor import Replicate, Shard, DTensor
 from torch.distributed._tensor import DeviceMesh, distribute_module
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
@@ -39,18 +40,64 @@ import torch.distributed as dist
 log = utils.get_logger("DEBUG")
 
 
-class CustomParallelStyle(ParallelStyle):
-    def __init__(self):
+class InterleavedLoRALinearParallel(ParallelStyle):
+    def __init__(self, input_shard_dim=1, output_shard_dim=0):
         super().__init__()
-        # Define sharding strategies or layouts here
+        self.input_shard_dim = input_shard_dim
+        self.output_shard_dim = output_shard_dim
 
-    def _partition_fn(self, module, device_mesh):
-        # Define custom partitioning logic for module’s parameters
-        return
+    def _apply(self, module, device_mesh):
+        # Shard the base weight across devices
+        if hasattr(module, 'weight') and module.weight is not None:
+            # Split and shard the weight tensor
+            shards = module.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+            local_shard = shards[device_mesh.get_rank()]
+            module.weight = Parameter(
+                DTensor.from_local(
+                    local_shard.contiguous(),  # Ensure the tensor is contiguous
+                    device_mesh=device_mesh,
+                    placements=[Shard(self.output_shard_dim)]
+                )
+            )
 
-    def _prepare_input_fn(self, mod, inputs, device_mesh):
-        # Define input sharding strategy here
-        return
+        # Shard lora_a weights
+        for lora_a in module.lora_a:
+            if lora_a.weight is not None:
+                shards = lora_a.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
+                local_shard = shards[device_mesh.get_rank()]
+                lora_a.weight = Parameter(
+                    DTensor.from_local(
+                        local_shard.contiguous(),
+                        device_mesh=device_mesh,
+                        placements=[Shard(self.input_shard_dim)]
+                    )
+                )
+
+        # Shard lora_b weights
+        for lora_b in module.lora_b:
+            if lora_b.weight is not None:
+                shards = lora_b.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+                local_shard = shards[device_mesh.get_rank()]
+                lora_b.weight = Parameter(
+                    DTensor.from_local(
+                        local_shard.contiguous(),
+                        device_mesh=device_mesh,
+                        placements=[Shard(self.output_shard_dim)]
+                    )
+                )
+
+        # Handle biases if necessary
+        if hasattr(module, 'bias') and module.bias is not None:
+            shards = module.bias.chunk(device_mesh.size(0), dim=0)
+            local_shard = shards[device_mesh.get_rank()]
+            module.bias = Parameter(
+                DTensor.from_local(
+                    local_shard.contiguous(),
+                    device_mesh=device_mesh,
+                    placements=[Shard(0)]
+                )
+            )
+
 
 
 class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
@@ -196,7 +243,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         # sampler and dataloader depend on the tokenizer and loss_fn and should be
         # setup after all of these are setup
-        self._sampler, self._dataloader = self._setup_data(
+        self._dataloader = self._setup_data(
             cfg_dataset=cfg.dataset,
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
@@ -282,44 +329,36 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         self._apply_lora_to_mlp = cfg_model.apply_lora_to_mlp
         self._apply_lora_to_output = getattr(cfg_model, "apply_lora_to_output", False)
 
+        # Initialize model on CPU for all ranks
         if self._is_rank_zero:
             log.info("Initializing Model on CPU for Rank 0 ...")
-            init_start = time.perf_counter()
 
-            with utils.set_default_dtype(self._dtype):
-                model = config.instantiate(cfg_model)
+        init_start = time.perf_counter()
 
-            log.info(
-                f"Model instantiation took {time.perf_counter() - init_start:.2f} secs"
-            )
+        with utils.set_default_dtype(self._dtype):
+            model = config.instantiate(cfg_model)
 
-            validate_state_dict_for_lora_async(
-                lora_attn_modules=cfg_model.lora_attn_modules,
-                apply_lora_to_mlp=cfg_model.apply_lora_to_mlp,
-                apply_lora_to_output=getattr(cfg_model, "apply_lora_to_output", False),
-                full_model_state_dict_keys=model.state_dict().keys(),
-                lora_state_dict_keys=(
-                    lora_weights_state_dict.keys()
-                    if lora_weights_state_dict is not None
-                    else None
-                ),
-                base_model_state_dict_keys=base_model_state_dict.keys(),
-            )
+        log.info(f"Model instantiation took {time.perf_counter() - init_start:.2f} secs")
 
-            # Load base model weights
-            log.info(
-                f"Start loading model state dict"
-            )
-            model.load_state_dict(base_model_state_dict, strict=False)
-            if lora_weights_state_dict:
-                model.load_state_dict(lora_weights_state_dict, strict=False)
-            log.info(
-                f"Finish loading model state dict"
-            )
-        else:
-            # For non-zero ranks, load the model on meta device
-            with utils.set_default_dtype(self._dtype), torch.device("meta"):
-                model = config.instantiate(cfg_model)
+        validate_state_dict_for_lora_async(
+            lora_attn_modules=cfg_model.lora_attn_modules,
+            apply_lora_to_mlp=cfg_model.apply_lora_to_mlp,
+            apply_lora_to_output=getattr(cfg_model, "apply_lora_to_output", False),
+            full_model_state_dict_keys=model.state_dict().keys(),
+            lora_state_dict_keys=(
+                lora_weights_state_dict.keys()
+                if lora_weights_state_dict is not None
+                else None
+            ),
+            base_model_state_dict_keys=base_model_state_dict.keys(),
+        )
+
+        # Load base model weights
+        log.info("Start loading model state dict")
+        model.load_state_dict(base_model_state_dict, strict=False)
+        if lora_weights_state_dict:
+            model.load_state_dict(lora_weights_state_dict, strict=False)
+        log.info("Finish loading model state dict")
 
         if self._dtype == torch.bfloat16 or self._dtype == torch.float16:
             model = model.to(self._dtype)
@@ -341,18 +380,18 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         # Define the Tensor Parallelism plan
         layer_tp_plan = {
-            "attn.q_proj": ColwiseParallel(),
-            "attn.k_proj": ColwiseParallel(),
-            "attn.v_proj": ColwiseParallel(),
-            "attn.output_proj": RowwiseParallel(),
-            "mlp.w1": ColwiseParallel(),
-            "mlp.w2": RowwiseParallel(),
-            "mlp.w3": ColwiseParallel(),
+            "sa_norm": SequenceParallel(),
+            "attn.q_proj": InterleavedLoRALinearParallel(),
+            "attn.k_proj": InterleavedLoRALinearParallel(),
+            "attn.v_proj": InterleavedLoRALinearParallel(),
+            "attn.output_proj": InterleavedLoRALinearParallel(),
+            "mlp_norm": SequenceParallel(),
+            "mlp.w1": InterleavedLoRALinearParallel(),
+            "mlp.w2": InterleavedLoRALinearParallel(),
+            "mlp.w3": InterleavedLoRALinearParallel(),
         }
-        
-        log.info(
-            f"Start parallelizing layers"
-        )
+
+        log.info("Start parallelizing layers")
 
         for _, transformer_block in enumerate(model.layers):
             # Adjust attention module to use the local number of heads
@@ -366,12 +405,11 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 parallelize_plan=layer_tp_plan,
             )
 
-
         # Apply parallelization using the `parallelize_module` function
         model_tp = parallelize_module(
             module=model,
             device_mesh=self.device_mesh,
-            parallelize_plan= {
+            parallelize_plan={
                 "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
                     output_layouts=Shard(1),
@@ -382,12 +420,10 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     # use DTensor as the output
                     use_local_output=False,
                 ),
-            }
+            },
         )
 
-        log.info(
-            f"Finish parallelizing module"
-        )
+        log.info("Finish parallelizing module")
 
         if enable_activation_checkpointing:
             utils.set_activation_checkpointing(
@@ -401,6 +437,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         torch.distributed.barrier()
 
         return model_tp
+
 
     def _setup_optimizer(
         self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
@@ -457,14 +494,11 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             ds = config.instantiate(cfg_dataset, tokenizer=self._tokenizer)
             packed = cfg_dataset.get("packed", False)
 
-        sampler = DistributedSampler(
-            ds, num_replicas=world_size, rank=rank, shuffle=shuffle, seed=0
-        )
 
         dataloader = DataLoader(
             dataset=ds,
             batch_size=batch_size,
-            sampler=sampler,
+            shuffle=shuffle,
             collate_fn=partial(
                 utils.padded_collate,
                 padding_idx=self._tokenizer.pad_id,
@@ -477,7 +511,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         if self._is_rank_zero:
             log.info("Dataset and Sampler are initialized.")
 
-        return sampler, dataloader
+        return dataloader
 
     def save_checkpoint(
         self,
@@ -537,9 +571,6 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         for curr_epoch in range(self.epochs_run, self.total_epochs):
 
-            # Update the sampler
-            self._sampler.set_epoch(curr_epoch)
-
             pbar = tqdm(total=self._steps_per_epoch, disable=not (rank == 0))
             for idx, batch in enumerate(self._dataloader):
                 if (
@@ -573,8 +604,53 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 else:
                     input_pos_repeated = None
 
+                # Shard tokens_repeated along batch dimension (dim=0)
+                shards = tokens_repeated.chunk(self.device_mesh.size(0), dim=0)
+                local_shard = shards[self.device_mesh.get_rank()]
+                tokens_repeated = DTensor.from_local(
+                    local_shard.contiguous(),
+                    device_mesh=self.device_mesh,
+                    placements=[Shard(0)]
+                )
+
+                # Move to the correct device
+                tokens_repeated = tokens_repeated.to(self.device_mesh.device_type)
+
+                # Repeat for labels, mask, and input_pos
+                shards = labels_repeated.chunk(self.device_mesh.size(0), dim=0)
+                local_shard = shards[self.device_mesh.get_rank()]
+                labels_repeated = DTensor.from_local(
+                    local_shard.contiguous(),
+                    device_mesh=self.device_mesh,
+                    placements=[Shard(0)]
+                )
+                labels_repeated = labels_repeated.to(self.device_mesh.device_type)
+
+                if mask is not None:
+                    shards = mask_repeated.chunk(self.device_mesh.size(0), dim=0)
+                    local_shard = shards[self.device_mesh.get_rank()]
+                    mask_repeated = DTensor.from_local(
+                        local_shard.contiguous(),
+                        device_mesh=self.device_mesh,
+                        placements=[Shard(0)]
+                    )
+                    mask_repeated = mask_repeated.to(self.device_mesh.device_type)
+
+                if input_pos is not None:
+                    shards = input_pos_repeated.chunk(self.device_mesh.size(0), dim=0)
+                    local_shard = shards[self.device_mesh.get_rank()]
+                    input_pos_repeated = DTensor.from_local(
+                        local_shard.contiguous(),
+                        device_mesh=self.device_mesh,
+                        placements=[Shard(0)]
+                    )
+                    input_pos_repeated = input_pos_repeated.to(self.device_mesh.device_type)
+
+
                 # Perform one forward pass
+                log.info("start forward pass")
                 logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
+                log.info("finish forward pass")
                 logits = logits[..., :-1, :].contiguous()
                 logits = logits.transpose(1, 2)
                 labels_shifted = labels_repeated[..., 1:].contiguous()
@@ -591,9 +667,11 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     lora_labels = labels_shifted[i * bsz:(i + 1) * bsz, ...]
 
                     # Compute loss
+                    log.info("start computing loss")
                     loss = self._loss_fn(lora_output, lora_labels)
                     loss = loss / self._gradient_accumulation_steps
                     running_loss += loss.item()
+                    log.info("finish computing loss")
 
                     # Zero out gradients of LoRA parameters
                     for module in lora_modules:
@@ -601,7 +679,9 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                         module.lora_b.weight.grad = None
 
                     # Compute gradients w.r.t. LoRA parameters
+                    log.info("start backward pass")
                     loss.backward(retain_graph=True)
+                    log.info("finish backward pass")
 
                     # Accumulate gradients
                     for module in lora_modules:

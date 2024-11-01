@@ -167,7 +167,9 @@ class CausalSelfAttention(nn.Module):
             - Make application of positional embeddings optional
         """
         # input has shape [b, s, d]
+        print("get x shape")
         bsz, seq_len, _ = x.shape
+        print("get x shape done")
 
         if seq_len > self.max_seq_len:
             raise ValueError(
@@ -178,10 +180,13 @@ class CausalSelfAttention(nn.Module):
         # q has shape [b, s, num_heads * head_dim]
         # k has shape [b, s, num_kv_heads * head_dim]
         # v has shape [b, s, num_kv_heads * head_dim]
+        print(f"q attention")
         q = self.q_proj(x)
+        print(f"k attention")
         k = self.k_proj(x)
+        print(f"v attention")
         v = self.v_proj(x)
-
+        print(f"finish proj qkv")
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
 

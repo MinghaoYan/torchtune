@@ -13,6 +13,7 @@ from torchtune.modules import CausalSelfAttention, KVCache
 from torch.utils.checkpoint import checkpoint
 
 
+
 class TransformerDecoderLayer(nn.Module):
     """Transformer layer derived from the Llama2 model. Normalization is applied before the attention **and** FF layer.
 
@@ -69,11 +70,14 @@ class TransformerDecoderLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
+        print(f"start sa norm")
+        norm_x = self.sa_norm(x)
+        print(f"start attention")
+        attn_out = self.attn(norm_x, mask=mask, input_pos=input_pos)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
-
+        print(f"start mlp")
         # print(f"h shape is {h.shape}")
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h))
@@ -81,6 +85,7 @@ class TransformerDecoderLayer(nn.Module):
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + mlp_out
+        print(f"finish mlp")
         return out
 
 
@@ -220,10 +225,13 @@ class TransformerDecoder(nn.Module):
             - m_s: max seq len
         """
         # input tensor of shape [b, s]
+        print("gets token shape")
         bsz, seq_len = tokens.shape
+        print(f"token shape is {bsz, seq_len}")
 
         # shape: [b, s, d]
         h = self.tok_embeddings(tokens)
+        print(f"finish embedding layer with shape {h.shape}")
 
         if self.causal_mask is not None:
             if input_pos is None:

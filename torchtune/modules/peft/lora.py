@@ -12,10 +12,10 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 
 from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
-from torchtune.modules.low_precision import _register_nf4_dispatch_ops  # noqa: F401
 from torchtune.modules.peft.peft_utils import AdapterModule
 from torchtune import utils
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed._tensor import DTensor, Shard
 
 import torch.distributed as dist
 
@@ -145,15 +145,14 @@ class LoRALinear(nn.Module, AdapterModule):
         # Handle first layer
         # total_dim = len(self.rank) * 
         # if x.shape[0] == 1:
-        # print(f"Lora input dim is {x.shape}")
         lora_out = []
         num_adapters = len(self.rank)
-        # print(x.shape[0], self.bsz, x.shape[0] == self.bsz)
         if x.shape[0] == self.bsz and num_adapters > 1:
             x = x.repeat(num_adapters, 1, 1)
         # print(f"Lora input dim after repeat is {x.shape}")
         after_dropout = self.dropout(x)
         bsz = x.shape[0] // num_adapters
+        # print(f"enter adapter loop")
         for idx in range(num_adapters):
             lora_a_slice = after_dropout[idx * bsz: (idx + 1) * bsz, :, :]
             # print(f"lora_a_slice dim is {lora_a_slice.shape}")
@@ -177,7 +176,7 @@ class LoRALinear(nn.Module, AdapterModule):
         # for out in lora_out:
         #     print(out.shape)
         total_out = torch.stack(lora_out, dim=0)
-        # print(total_out.shape)
+        print(total_out.shape)
         
         return total_out
 
@@ -194,6 +193,21 @@ def _lora_b_init_params(x: nn.Linear) -> None:
     Initialize LoRA B weight to zeros.
     """
     nn.init.zeros_(x.weight)
+
+def _lora_a_list_init_params(x: nn.ModuleList) -> None:
+    """
+    Initialize LoRA A weight to Kaiming uniform.
+    """
+    for lora in x:
+        nn.init.kaiming_uniform_(lora.weight, a=math.sqrt(5))
+
+
+def _lora_b_list_init_params(x: nn.ModuleList) -> None:
+    """
+    Initialize LoRA B weight to zeros.
+    """
+    for lora in x:
+        nn.init.zeros_(lora.weight)
 
 
 
@@ -249,8 +263,17 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
             "bias", nn.Parameter(bias) if bias is not None else None
         )
         self.dropout = nn.Dropout(p=dropout)
-        self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
-        self.lora_b = nn.Linear(in_features=sum(self.rank), out_features=out_dim, bias=False)
+
+        # self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
+        # self.lora_b = nn.Linear(in_features=sum(self.rank), out_features=out_dim, bias=False)
+
+        # Initialize ModuleLists for lora_a and lora_b
+        self.lora_a = nn.ModuleList()
+        self.lora_b = nn.ModuleList()
+        for r in self.rank:
+            self.lora_a.append(nn.Linear(in_features=self.in_dim, out_features=r, bias=False))
+            self.lora_b.append(nn.Linear(in_features=r, out_features=self.out_dim, bias=False))
+
 
         self.world_size, self.device_rank = utils.get_world_size_and_rank()
 
@@ -259,11 +282,6 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         self.start_row = sum(self.rank[:self.device_rank])
         self.end_row = sum(self.rank[:self.device_rank]) + self.rank[self.device_rank]
 
-        # for idx in range(len(self.rank)):
-        #     setattr(self, f'lora_a_0_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
-        #     setattr(self, f'lora_b_0_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
-        #     setattr(self, f'lora_a_1_{idx}', nn.Linear(in_features=in_dim, out_features=self.rank[idx], bias=False))
-        #     setattr(self, f'lora_b_1_{idx}', nn.Linear(in_features=self.rank[idx], out_features=out_dim, bias=False))
 
         self.merged = False
         # Note: FSDP's meta device initialization contract assumes that a module's
@@ -279,13 +297,8 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
     def initialize_parameters(self):
         # Initialize as in
         # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
-        _lora_a_init_params(self.lora_a)
-        _lora_b_init_params(self.lora_b)
-        # for idx in range(len(self.rank)):
-        #     _lora_a_init_params(getattr(self, f"lora_a_0_{idx}"))
-        #     _lora_b_init_params(getattr(self, f"lora_b_0_{idx}"))
-        #     _lora_a_init_params(getattr(self, f"lora_a_1_{idx}"))
-        #     _lora_b_init_params(getattr(self, f"lora_b_1_{idx}"))
+        _lora_a_list_init_params(self.lora_a)
+        _lora_b_list_init_params(self.lora_b)
 
 
     def _create_weight_and_bias(self):
@@ -312,42 +325,22 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         """
         # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
         # in this module change.
-        adapter_params = ["lora_a.weight", "lora_b.weight"]
-        # for idx in range(len(self.rank)):
-        #     adapter_params.append(f"lora_a_0_{idx}.weight")
-        #     adapter_params.append(f"lora_b_0_{idx}.weight")
-        #     adapter_params.append(f"lora_a_1_{idx}.weight")
-        #     adapter_params.append(f"lora_b_1_{idx}.weight")
+        # adapter_params = ["lora_a.weight", "lora_b.weight"]
+
+        adapter_params = []
+
+        for i, (lora_a, lora_b) in enumerate(zip(self.lora_a, self.lora_b)):
+            # Access the weights of each LoRA adapter in the ModuleList
+            adapter_params.append(f"lora_a.{i}.weight")
+            adapter_params.append(f"lora_b.{i}.weight")
+
+            # If the LoRA layers have bias (if added in the future), include them as well
+            if lora_a.bias is not None:
+                adapter_params.append(f"lora_a.{i}.bias")
+            if lora_b.bias is not None:
+                adapter_params.append(f"lora_b.{i}.bias")
+
         return adapter_params
-
-    
-    # def all_gather_lora_weight(self, lora_module):
-    #     # Ensure all the workers are synchronized
-    #     dist.barrier()
-
-    #     # Get the local weight (sharded part)
-    #     local_weight = lora_module.weight
-
-    #     # Create an empty list of tensors for gathering the weights from all ranks
-    #     gathered_weights = [torch.zeros_like(local_weight) for _ in range(dist.get_world_size())]
-
-    #     # Perform the all-gather operation across all ranks
-    #     dist.all_gather(gathered_weights, local_weight)
-
-    #     # Concatenate the gathered shards into the full weight
-    #     full_weight = torch.cat(gathered_weights, dim=0)
-
-    #     return full_weight
-
-    def all_gather_lora_weight(self, lora_layer):
-        gathered_weights = dist.nn.functional.all_gather(
-            lora_layer.weight,
-            group=None
-        )
-        # The gathered_weights will be a concatenation of the weights from all ranks
-        # Assuming lora_layer.weight has shape [local_rank_size, ...]
-        # gathered_weights will have shape [world_size * local_rank_size, ...]
-        return torch.cat(gathered_weights, dim=0)
 
     def forward(self, x: Tensor, activated: int = 0):
         if self._quantize_base:
@@ -358,94 +351,41 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         if self.disabled:
             return out, []
 
-        # Ensure the input shape is correct
-        # assert x.shape[0] == len(self.rank) * self.bsz, f"input shape is not correct, rank len is {len(self.rank)}, bsz is {self.bsz}, x shape is {x.shape[0]}, correct is {len(self.rank) * self.bsz}"
         bsz = x.shape[0] // len(self.rank)
-        # print(f"x.shape[0] is { x.shape[0] }, len self rank is {len(self.rank)}, bsz is {bsz}")
-        # Gather the full weight matrices for lora_a and lora_b across all ranks
-        if torch.distributed.is_initialized():
-            gathered_lora_a_weight = self.all_gather_lora_weight(self.lora_a)
-            gathered_lora_b_weight = self.all_gather_lora_weight(self.lora_b)
+        if bsz == 0:
+            raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
 
-            gathered_lora_a_weight = gathered_lora_a_weight.view(self.lora_a.out_features, self.lora_a.in_features).to(x.dtype)
-            gathered_lora_b_weight = gathered_lora_b_weight.view(self.lora_b.out_features, self.lora_b.in_features).to(x.dtype)
-        else:
-            gathered_lora_a_weight = self.lora_a.weight
-            gathered_lora_b_weight = self.lora_b.weight
+        lora_outs = []
+
+        # Iterate over each LoRA adapter
+        print(f"enter adapter loop")
+        for i in range(len(self.rank)):
+            print(f"current adapter index is {i}")
+            input_i = x[i * bsz : (i + 1) * bsz, ...]
+
+            print(f"input_i is DTensor: {isinstance(input_i, DTensor)}, input_i shape is {input_i.shape}")
 
 
-        lora_outs = []  # List to store per-LoRA outputs
-        start_idx = 0
+            print(f"Apply dropout")
+            input_i = self.dropout(input_i)
+            print(f"input_i is DTensor: {isinstance(input_i, DTensor)}, input_i shape is {input_i.shape}")
 
-        # Loop over LoRA adapters and compute per-adapter outputs
-        for i, rank_i in enumerate(self.rank):
-            input_i = x[i * bsz:(i+1) * bsz, ...]
-            end_idx = start_idx + rank_i
+            print(f"Compute LoRA A outputs, lora a is {self.lora_a[i]}")
+            lora_a_out_i = self.lora_a[i](input_i)
+            print(f"LoRA A output shape: {lora_a_out_i.shape}, device: {lora_a_out_i.device}")
 
-            # Gather the weight slices for lora_a and lora_b for the current adapter
-            # print(f"lora a weight is {gathered_lora_a_weight.shape}, lora b weight is {gathered_lora_b_weight.shape}")
-            lora_a_weight_i = gathered_lora_a_weight[start_idx:end_idx, :]  # Shape: (rank_i, in_dim)
-            lora_b_weight_i = gathered_lora_b_weight[:, start_idx:end_idx]  # Shape: (out_dim, rank_i)
+            print(f"Compute LoRA B outputs")
+            lora_out_i = self.lora_b[i](lora_a_out_i)
+            print(f"LoRA B output shape: {lora_out_i.shape}, device: {lora_out_i.device}")
 
-            # Compute LoRA A output for the current adapter
-            lora_a_out_i = F.linear(self.dropout(input_i), lora_a_weight_i)  # Shape: (batch_size, seq_len, rank_i)
-
-            # Compute LoRA output using LoRA B for the current adapter
-            lora_out_i = F.linear(lora_a_out_i, lora_b_weight_i)  # Shape: (batch_size, seq_len, out_dim)
-
-            # Scale the LoRA output
+            print(f"Scale the LoRA output")
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_out_i
 
-            # Option 2: Return base output + scaled LoRA output
-            lora_outs.append(out[i * bsz:(i+1) * bsz, ...] + scaled_lora_out_i)
+            print(f"Combine with base output")
+            base_out_i = out[i * bsz : (i + 1) * bsz, ...]
+            base_out_i = base_out_i.to(scaled_lora_out_i.device)
 
-            # Move to the next adapter's slice
-            start_idx = end_idx
+            lora_outs.append(base_out_i + scaled_lora_out_i)
 
-        # Concatenate LoRA outputs along the batch dimension and return
+        print(f"Concatenate outputs")
         return torch.cat(lora_outs, dim=0)
-
-
-    # def forward(self, x: Tensor, activated: int = 0):
-    #     if self._quantize_base:
-    #         out = linear_nf4(input=x, weight=self.weight)
-    #     else:
-    #         out = F.linear(x, self.weight, None)
-    #     if self.disabled:
-    #         return out, []
-
-    #     lora_outs = []  # List to store per-LoRA outputs
-
-    #     assert x.shape[0] == len(self.rank) * self.bsz, f"input shape is not correct, x shape is {x.shape[0]}, correct is {len(self.rank) * self.bsz}"
-    #     start_idx = 0
-    #     for i, rank_i in enumerate(self.rank):
-    #         input_i = x[i * self.bsz:(i+1) * self.bsz, ...]
-    #         end_idx = start_idx + rank_i
-
-    #         # Get the weight slices for lora_a and lora_b for adapter i
-    #         print(f"lora a weight is {self.lora_a.weight.shape}, lora b weight is {self.lora_b.weight.shape}")
-    #         lora_a_weight_i = self.lora_a.weight[start_idx:end_idx, :]  # Shape: (rank_i, in_dim)
-    #         lora_b_weight_i = self.lora_b.weight[:, start_idx:end_idx]  # Shape: (out_dim, rank_i)
-
-    #         # Compute lora_a_out_i
-    #         lora_a_out_i = F.linear(self.dropout(input_i), lora_a_weight_i)
-    #         # lora_a_out_i shape: (batch_size, seq_len, rank_i)
-
-    #         # Compute lora_out_i
-    #         lora_out_i = F.linear(lora_a_out_i, lora_b_weight_i.t())
-    #         # lora_b_weight_i.t() shape: (rank_i, out_dim)
-    #         # lora_out_i shape: (batch_size, seq_len, out_dim)
-
-    #         # Scale the LoRA output
-    #         scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_out_i
-
-    #         # Option 1: Return scaled LoRA outputs only
-    #         # lora_outs.append(scaled_lora_out_i)
-
-    #         # Option 2: Return base output + scaled LoRA output
-    #         lora_outs.append(out + scaled_lora_out_i)
-
-    #         start_idx = end_idx
-
-    #     # Return the base output and the list of per-LoRA outputs
-    #     return torch.cat(lora_outs, dim=0)
