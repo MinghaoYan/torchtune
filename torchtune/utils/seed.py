@@ -55,15 +55,18 @@ def set_seed(
         raise ValueError(
             f"Invalid seed value provided: {seed}. Value must be in the range [{min_val}, {max_val}]"
         )
-    local_seed = seed + rank
-    if rank == 0:
-        _log.debug(
-            f"Setting manual seed to local seed {local_seed}. Local seed is seed + rank = {seed} + {rank}"
-        )
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    # local_seed = seed + rank
+    # if rank == 0:
+    #     _log.debug(
+    #         f"Setting manual seed to local seed {local_seed}. Local seed is seed + rank = {seed} + {rank}"
+    #     )
 
-    torch.manual_seed(local_seed)
-    np.random.seed(local_seed)
-    random.seed(local_seed)
+    # torch.manual_seed(local_seed)
+    # np.random.seed(local_seed)
+    # random.seed(local_seed)
 
     if debug_mode is not None:
         _log.debug(f"Setting deterministic debug mode to {debug_mode}")

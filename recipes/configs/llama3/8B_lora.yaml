@@ -48,7 +48,7 @@ resume_from_checkpoint: False
 # Dataset and Sampler
 dataset:
   _component_: torchtune.datasets.hellaswag_dataset
-seed: null
+seed: 128
 shuffle: True
 batch_size: 1
 

@@ -494,6 +494,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             ds = config.instantiate(cfg_dataset, tokenizer=self._tokenizer)
             packed = cfg_dataset.get("packed", False)
 
+        # torch.seed()
 
         dataloader = DataLoader(
             dataset=ds,
@@ -626,29 +627,10 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 )
                 labels_repeated = labels_repeated.to(self.device_mesh.device_type)
 
-                if mask is not None:
-                    shards = mask_repeated.chunk(self.device_mesh.size(0), dim=0)
-                    local_shard = shards[self.device_mesh.get_rank()]
-                    mask_repeated = DTensor.from_local(
-                        local_shard.contiguous(),
-                        device_mesh=self.device_mesh,
-                        placements=[Shard(0)]
-                    )
-                    mask_repeated = mask_repeated.to(self.device_mesh.device_type)
-
-                if input_pos is not None:
-                    shards = input_pos_repeated.chunk(self.device_mesh.size(0), dim=0)
-                    local_shard = shards[self.device_mesh.get_rank()]
-                    input_pos_repeated = DTensor.from_local(
-                        local_shard.contiguous(),
-                        device_mesh=self.device_mesh,
-                        placements=[Shard(0)]
-                    )
-                    input_pos_repeated = input_pos_repeated.to(self.device_mesh.device_type)
-
 
                 # Perform one forward pass
                 log.info("start forward pass")
+                log.info(f"token repeated shape is {tokens_repeated.shape}")
                 logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
                 log.info("finish forward pass")
                 logits = logits[..., :-1, :].contiguous()
