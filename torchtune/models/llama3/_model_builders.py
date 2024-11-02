@@ -14,7 +14,7 @@ from torchtune.models.llama3._model_utils import scale_hidden_dim_for_mlp
 from torchtune.modules import TransformerDecoder
 from torchtune.modules.tokenizers import TikTokenTokenizer
 from torchtune.modules.peft import LORA_ATTN_MODULES
-
+from torch.distributed._tensor import DeviceMesh
 
 """
 Model builders build specific instantiations using component builders. For example
@@ -204,6 +204,7 @@ Please see `lora_llama3_70b` for full API arguments.
 
 def async_lora_llama3_8b(
     lora_attn_modules: List[LORA_ATTN_MODULES],
+    device_ids: List,
     apply_lora_to_mlp: bool = False,
     apply_lora_to_output: bool = False,
     lora_rank: int = 8,
@@ -233,6 +234,7 @@ def async_lora_llama3_8b(
     Returns:
         TransformerDecoder: Instantiation of Llama3 8B model with LoRA applied
     """
+    devise_mesh = DeviceMesh('cuda', device_ids)
     return async_lora_llama3(
         lora_attn_modules=lora_attn_modules,
         apply_lora_to_mlp=apply_lora_to_mlp,
@@ -252,6 +254,7 @@ def async_lora_llama3_8b(
         lora_dropout=0.0,
         quantize_base=quantize_base,
         bsz=bsz,
+        device_mesh=devise_mesh,
     )
 
 

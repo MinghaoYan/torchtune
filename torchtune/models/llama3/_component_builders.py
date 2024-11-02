@@ -9,6 +9,7 @@ from typing import List, Literal, Optional
 
 import torch
 from torch import nn
+from torch.distributed._tensor import DeviceMesh
 
 from torchtune.models.llama3._model_utils import scale_hidden_dim_for_mlp
 
@@ -26,7 +27,7 @@ from torchtune.modules import (
 
 from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
 
-from torchtune.modules.peft import LORA_ATTN_MODULES, LoRALinear, InterleavedLoRALinear
+from torchtune.modules.peft import LORA_ATTN_MODULES, LoRALinear, InterleavedLoRALinear, LoRALinearColCol, LoRALinearRowCol
 
 """
 Component builders for the Llama3 model and popular variants such as LoRA.
@@ -439,30 +440,34 @@ def async_lora_llama3_mlp(
     lora_alpha: float,
     lora_dropout: float = 0.0,
     quantize_base: bool = False,
+    device_mesh: DeviceMesh,
 ) -> FeedForward:
-    gate_proj = InterleavedLoRALinear(
+    gate_proj = LoRALinearColCol(
         in_dim=dim,
         out_dim=hidden_dim,
         rank=lora_rank,
         alpha=lora_alpha,
         dropout=lora_dropout,
         quantize_base=quantize_base,
+        device_mesh=device_mesh,
     )
-    down_proj = InterleavedLoRALinear(
+    down_proj = LoRALinearColCol(
         in_dim=hidden_dim,
         out_dim=dim,
         rank=lora_rank,
         alpha=lora_alpha,
         dropout=lora_dropout,
         quantize_base=quantize_base,
+        device_mesh=device_mesh,
     )
-    up_proj = InterleavedLoRALinear(
+    up_proj = LoRALinearRowCol(
         in_dim=dim,
         out_dim=hidden_dim,
         rank=lora_rank,
         alpha=lora_alpha,
         dropout=lora_dropout,
         quantize_base=quantize_base,
+        device_mesh=device_mesh,
     )
     return FeedForward(
         gate_proj=gate_proj,
@@ -481,6 +486,8 @@ def async_lora_llama3_self_attention(
     max_seq_len: int,
     attn_dropout: float = 0.0,
     rope_base: float = 500000.0,
+    # Dist args
+    device_mesh: DeviceMesh,
     # LoRA args
     lora_rank: int,
     lora_alpha: float,
@@ -527,7 +534,7 @@ def async_lora_llama3_self_attention(
     head_dim = embed_dim // num_heads
     num_kv_heads = num_kv_heads if num_kv_heads else num_heads
     q_proj = (
-        InterleavedLoRALinear(
+        LoRALinearColCol(
             embed_dim,
             num_heads * head_dim,
             rank=lora_rank,
@@ -535,12 +542,13 @@ def async_lora_llama3_self_attention(
             dropout=lora_dropout,
             quantize_base=quantize_base,
             bsz=bsz,
+            device_mesh=device_mesh,
         )
         if "q_proj" in lora_modules
         else nn.Linear(embed_dim, num_heads * head_dim, bias=False)
     )
     k_proj = (
-        InterleavedLoRALinear(
+        LoRALinearColCol(
             embed_dim,
             num_kv_heads * head_dim,
             rank=lora_rank,
@@ -548,25 +556,27 @@ def async_lora_llama3_self_attention(
             dropout=lora_dropout,
             quantize_base=quantize_base,
             bsz=bsz,
+            device_mesh=device_mesh,
         )
         if "k_proj" in lora_modules
         else nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False)
     )
     v_proj = (
-        InterleavedLoRALinear(
+        LoRALinearColCol(
             embed_dim,
             num_kv_heads * head_dim,
             rank=lora_rank,
             alpha=lora_alpha,
             dropout=lora_dropout,
             quantize_base=quantize_base,
+            device_mesh=device_mesh,
             bsz=bsz,
         )
         if "v_proj" in lora_modules
         else nn.Linear(embed_dim, num_kv_heads * head_dim, bias=False)
     )
     output_proj = (
-        InterleavedLoRALinear(
+        LoRALinearRowCol(
             embed_dim,
             embed_dim,
             rank=lora_rank,
@@ -574,6 +584,7 @@ def async_lora_llama3_self_attention(
             dropout=lora_dropout,
             quantize_base=quantize_base,
             bsz=bsz,
+            device_mesh=device_mesh,
         )
         if "output_proj" in lora_modules
         else nn.Linear(embed_dim, embed_dim, bias=False)
@@ -615,6 +626,8 @@ def async_lora_llama3(
     lora_rank: int,
     lora_alpha: float,
     lora_dropout: float = 0.0,
+    # Dist args
+    device_mesh: DeviceMesh,
     # Quantization args
     quantize_base: bool = False,
     bsz: int=1,
@@ -672,6 +685,7 @@ def async_lora_llama3(
         lora_dropout=lora_dropout,
         quantize_base=quantize_base,
         bsz=bsz,
+        device_mesh=device_mesh,
     )
 
     hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
@@ -683,6 +697,7 @@ def async_lora_llama3(
             lora_alpha=lora_alpha,
             quantize_base=quantize_base,
             lora_dropout=lora_dropout,
+            device_mesh=device_mesh,
         )
     else:
         mlp = llama3_mlp(dim=embed_dim, hidden_dim=hidden_dim)

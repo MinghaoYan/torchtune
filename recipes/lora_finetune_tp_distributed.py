@@ -9,6 +9,7 @@ from warnings import warn
 import torch
 from omegaconf import DictConfig, ListConfig
 
+import torch.nn.functional as F
 from torch import nn
 from torch.nn import Parameter
 from torch.distributed import destroy_process_group, init_process_group
@@ -86,18 +87,103 @@ class InterleavedLoRALinearParallel(ParallelStyle):
                     )
                 )
 
-        # Handle biases if necessary
-        if hasattr(module, 'bias') and module.bias is not None:
-            shards = module.bias.chunk(device_mesh.size(0), dim=0)
-            local_shard = shards[device_mesh.get_rank()]
-            module.bias = Parameter(
+
+class LoRALinearColColParallel(ParallelStyle):
+    def __init__(self, input_shard_dim=1, output_shard_dim=0):
+        super().__init__()
+        self.input_shard_dim = input_shard_dim
+        self.output_shard_dim = output_shard_dim
+
+    def _apply(self, module, device_mesh):
+        # Column-partitioning for base weight matrix and LoRA components A1 and B1
+        if hasattr(module, 'weight') and module.weight is not None:
+            weight_shards = module.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+            local_weight_shard = weight_shards[device_mesh.get_rank()]
+            sharded_weight = Parameter(
                 DTensor.from_local(
-                    local_shard.contiguous(),
+                    local_weight_shard.contiguous(),
                     device_mesh=device_mesh,
-                    placements=[Shard(0)]
+                    placements=[Shard(self.input_shard_dim)]
                 )
             )
+            setattr(module, 'weight', sharded_weight)  # Ensures in-place update
 
+        # Column-partitioning for LoRA A1 with explicit setattr
+        for i, lora_a in enumerate(module.lora_a):
+            if lora_a.weight is not None:
+                shards = lora_a.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+                local_shard = shards[device_mesh.get_rank()]
+                if lora_a.weight.shape[0] == 8:
+                    print(f"[Rank {device_mesh.get_rank()}] LoRA A1[{i}] shard shape: {local_shard.shape}")
+                sharded_weight = Parameter(
+                    DTensor.from_local(
+                        local_shard.contiguous(),
+                        device_mesh=device_mesh,
+                        placements=[Shard(self.output_shard_dim)]
+                    )
+                )
+                setattr(lora_a, 'weight', sharded_weight)  # Persistent in-place update
+                if lora_a.weight.shape[0] == 4:
+                    print(f"[Rank {device_mesh.get_rank()}] LoRA A1[{i}] shard shape: {lora_a.weight.shape}")
+
+        # Column-partitioning for LoRA B1 with explicit setattr
+        for i, lora_b in enumerate(module.lora_b):
+            if lora_b.weight is not None:
+                lora_b_shards = lora_b.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+                local_lora_b_shard = lora_b_shards[device_mesh.get_rank()]
+                sharded_weight = Parameter(
+                    DTensor.from_local(
+                        local_lora_b_shard.contiguous(),
+                        device_mesh=device_mesh,
+                        placements=[Shard(self.output_shard_dim)]
+                    )
+                )
+                setattr(lora_b, 'weight', sharded_weight)  # Persistent in-place update
+
+
+class LoRALinearRowColParallel(ParallelStyle):
+    def __init__(self, input_shard_dim=1, output_shard_dim=0):
+        super().__init__()
+        self.input_shard_dim = input_shard_dim
+        self.output_shard_dim = output_shard_dim
+
+    def _apply(self, module, device_mesh):
+        # Row-partitioning for LoRA A2
+        if hasattr(module, 'weight') and module.weight is not None:
+            weight_shards = module.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
+            local_weight_shard = weight_shards[device_mesh.get_rank()]
+            module.weight = Parameter(
+                DTensor.from_local(
+                    local_weight_shard.contiguous(),
+                    device_mesh=device_mesh,
+                    placements=[Shard(self.input_shard_dim)]
+                )
+            )
+    
+        for lora_a in module.lora_a:
+            if lora_a.weight is not None:
+                lora_a_shards = lora_a.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
+                local_lora_a_shard = lora_a_shards[device_mesh.get_rank()]
+                lora_a.weight = Parameter(
+                    DTensor.from_local(
+                        local_lora_a_shard.contiguous(),
+                        device_mesh=device_mesh,
+                        placements=[Shard(self.input_shard_dim)]
+                    )
+                )
+
+        # Column-partitioning for LoRA B2
+        for lora_b in module.lora_b:
+            if lora_b.weight is not None:
+                lora_b_shards = lora_b.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+                local_lora_b_shard = lora_b_shards[device_mesh.get_rank()]
+                lora_b.weight = Parameter(
+                    DTensor.from_local(
+                        local_lora_b_shard.contiguous(),
+                        device_mesh=device_mesh,
+                        placements=[Shard(self.output_shard_dim)]
+                    )
+                )
 
 
 class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
@@ -335,8 +421,16 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         init_start = time.perf_counter()
 
+        # Define the device mesh for tensor parallelism
+        world_size = torch.distributed.get_world_size()
+        device_ids = list(range(world_size))
+        self.device_mesh = DeviceMesh('cuda', device_ids)
+
+        cfg_model.device_ids = device_ids
         with utils.set_default_dtype(self._dtype):
             model = config.instantiate(cfg_model)
+        
+        log.info(f"device mesh size 0 is {self.device_mesh.size(0)}")
 
         log.info(f"Model instantiation took {time.perf_counter() - init_start:.2f} secs")
 
@@ -373,61 +467,70 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         self.adapter_params = get_adapter_params(model)
         set_trainable_params(model, self.adapter_params)
 
-        # Define the device mesh for tensor parallelism
-        world_size = torch.distributed.get_world_size()
-        device_ids = list(range(world_size))
-        self.device_mesh = DeviceMesh('cuda', device_ids)
-
-        # Define the Tensor Parallelism plan
-        layer_tp_plan = {
-            "sa_norm": SequenceParallel(),
-            "attn.q_proj": InterleavedLoRALinearParallel(),
-            "attn.k_proj": InterleavedLoRALinearParallel(),
-            "attn.v_proj": InterleavedLoRALinearParallel(),
-            "attn.output_proj": InterleavedLoRALinearParallel(),
-            "mlp_norm": SequenceParallel(),
-            "mlp.w1": InterleavedLoRALinearParallel(),
-            "mlp.w2": InterleavedLoRALinearParallel(),
-            "mlp.w3": InterleavedLoRALinearParallel(),
+        # Combined Tensor Parallelism plan
+        # Base Tensor Parallelism plan
+        full_tp_plan = {
+            "tok_embeddings": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(1),
+            ),
+            "norm": SequenceParallel(),
+            "output": ColwiseParallel(
+                input_layouts=Shard(1),
+                use_local_output=False,
+            ),
         }
 
+        # Loop over each layer to add to the plan
+        for idx in range(len(model.layers)):
+            layer_prefix = f"layers.{idx}"
+            
+            # Add layer-specific parallelization strategies
+            full_tp_plan[f"{layer_prefix}.sa_norm"] = SequenceParallel(sequence_dim=1)
+            full_tp_plan[f"{layer_prefix}.attn.q_proj"] = LoRALinearColColParallel()
+            # Include other attention projections if needed
+            full_tp_plan[f"{layer_prefix}.attn.k_proj"] = LoRALinearColColParallel()
+            full_tp_plan[f"{layer_prefix}.attn.v_proj"] = LoRALinearColColParallel()
+            full_tp_plan[f"{layer_prefix}.attn.output_proj"] = LoRALinearRowColParallel()
+            full_tp_plan[f"{layer_prefix}.mlp_norm"] = SequenceParallel(sequence_dim=1)
+            full_tp_plan[f"{layer_prefix}.mlp.w1"] = LoRALinearColColParallel()
+            full_tp_plan[f"{layer_prefix}.mlp.w2"] = LoRALinearColColParallel()
+            full_tp_plan[f"{layer_prefix}.mlp.w3"] = LoRALinearRowColParallel()
+
+            # for new_idx in range(self.num_adapters):
+            #     # print(model.layers[0].attn.q_proj.lora_a[0])
+            #     full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_a.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_b.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_a.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_b.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_a.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_b.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_a.{new_idx}"] = RowwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_b.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w1.lora_a.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w1.lora_b.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w2.lora_a.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w2.lora_b.{new_idx}"] = ColwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w3.lora_a.{new_idx}"] = RowwiseParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w3.lora_b.{new_idx}"] = ColwiseParallel()
+
         log.info("Start parallelizing layers")
-
-        for _, transformer_block in enumerate(model.layers):
-            # Adjust attention module to use the local number of heads
-            attn_layer = transformer_block.attn
-            attn_layer.num_heads = attn_layer.num_heads // self.device_mesh.size()
-            attn_layer.num_kv_heads = attn_layer.num_kv_heads // self.device_mesh.size()
-
-            parallelize_module(
-                module=transformer_block,
-                device_mesh=self.device_mesh,
-                parallelize_plan=layer_tp_plan,
-            )
-
+        print(f"{model}")
         # Apply parallelization using the `parallelize_module` function
-        model_tp = parallelize_module(
+        model = parallelize_module(
             module=model,
             device_mesh=self.device_mesh,
-            parallelize_plan={
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(1),
-                ),
-                "norm": SequenceParallel(),
-                "output": ColwiseParallel(
-                    input_layouts=Shard(1),
-                    # use DTensor as the output
-                    use_local_output=False,
-                ),
-            },
+            parallelize_plan=full_tp_plan,
         )
+
+        for i, lora_a in enumerate(model.layers[0].attn.q_proj.lora_a):
+            print(f"[Rank {self.device_mesh.get_rank()}] LoRA A1[{i}] weight shape after parallelize_module: {lora_a.weight.shape}")
 
         log.info("Finish parallelizing module")
 
         if enable_activation_checkpointing:
             utils.set_activation_checkpointing(
-                model_tp, auto_wrap_policy={modules.TransformerDecoderLayer}
+                model, auto_wrap_policy={modules.TransformerDecoderLayer}
             )
 
         if self._is_rank_zero:
@@ -436,7 +539,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         torch.distributed.barrier()
 
-        return model_tp
+        return model
 
 
     def _setup_optimizer(
@@ -605,13 +708,17 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 else:
                     input_pos_repeated = None
 
-                # Shard tokens_repeated along batch dimension (dim=0)
-                shards = tokens_repeated.chunk(self.device_mesh.size(0), dim=0)
-                local_shard = shards[self.device_mesh.get_rank()]
+                # max_seq_len = tokens_repeated.shape[1]
+                # if max_seq_len % self.device_mesh.size(0) != 0:
+                #     # Calculate padding to make sequence length divisible by the number of ranks
+                #     pad_len = self.device_mesh.size(0) - (max_seq_len % self.device_mesh.size(0))
+                #     tokens_repeated = F.pad(tokens_repeated, (0, 0, 0, pad_len))  # pad on sequence dimension
+
+                # Ensure tokens_repeated is fully replicated before embedding layer
                 tokens_repeated = DTensor.from_local(
-                    local_shard.contiguous(),
+                    tokens_repeated.contiguous(),
                     device_mesh=self.device_mesh,
-                    placements=[Shard(0)]
+                    placements=[Replicate()]  # Ensure full replication across ranks
                 )
 
                 # Move to the correct device

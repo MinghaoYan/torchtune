@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .lora import LoRALinear, InterleavedLoRALinear
+from .lora import LoRALinear, InterleavedLoRALinear, LoRALinearColCol, LoRALinearRowCol
 from .peft_utils import (  # noqa
     AdapterModule,
     disable_adapter,
@@ -24,4 +24,6 @@ __all__ = [
     "validate_state_dict_for_lora",
     "disable_adapter",
     "InterleavedLoRALinear",
+    "LoRALinearColCol",
+    "LoRALinearRowCol",
 ]

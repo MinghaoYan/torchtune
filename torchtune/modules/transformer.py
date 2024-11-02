@@ -70,9 +70,9 @@ class TransformerDecoderLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        print(f"start sa norm")
+        print(f"x shape before norm is {x.shape}")
         norm_x = self.sa_norm(x)
-        print(f"start attention")
+        print(f"start attention input shape is {norm_x.shape}")
         attn_out = self.attn(norm_x, mask=mask, input_pos=input_pos)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
@@ -225,7 +225,7 @@ class TransformerDecoder(nn.Module):
             - m_s: max seq len
         """
         # input tensor of shape [b, s]
-        print("gets token shape")
+        # print("gets token shape")
         bsz, seq_len = tokens.shape
         print(f"token shape is {bsz, seq_len}")
 
@@ -246,8 +246,9 @@ class TransformerDecoder(nn.Module):
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             # shape: [b, s, d]
+            print(f"layer {i} input shape is {h.shape}")
             h = layer(h, mask=mask, input_pos=input_pos)
 
         # shape: [b, s, d]

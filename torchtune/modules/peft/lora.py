@@ -15,7 +15,7 @@ from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 from torchtune.modules.peft.peft_utils import AdapterModule
 from torchtune import utils
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed._tensor import DTensor, Shard
+from torch.distributed._tensor import DTensor, Shard, DeviceMesh
 
 import torch.distributed as dist
 
@@ -358,34 +358,373 @@ class InterleavedLoRALinear(nn.Module, AdapterModule):
         lora_outs = []
 
         # Iterate over each LoRA adapter
-        print(f"enter adapter loop")
         for i in range(len(self.rank)):
             print(f"current adapter index is {i}")
             input_i = x[i * bsz : (i + 1) * bsz, ...]
 
-            print(f"input_i is DTensor: {isinstance(input_i, DTensor)}, input_i shape is {input_i.shape}")
-
-
-            print(f"Apply dropout")
             input_i = self.dropout(input_i)
             print(f"input_i is DTensor: {isinstance(input_i, DTensor)}, input_i shape is {input_i.shape}")
 
-            print(f"Compute LoRA A outputs, lora a is {self.lora_a[i]}")
             lora_a_out_i = self.lora_a[i](input_i)
             print(f"LoRA A output shape: {lora_a_out_i.shape}, device: {lora_a_out_i.device}")
 
-            print(f"Compute LoRA B outputs")
             lora_out_i = self.lora_b[i](lora_a_out_i)
             print(f"LoRA B output shape: {lora_out_i.shape}, device: {lora_out_i.device}")
 
-            print(f"Scale the LoRA output")
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_out_i
 
-            print(f"Combine with base output")
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
             base_out_i = base_out_i.to(scaled_lora_out_i.device)
 
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
-        print(f"Concatenate outputs")
-        return torch.cat(lora_outs, dim=0)
+        concatenated_lora = torch.cat(lora_outs, dim=0)
+        print(f"lora outs shape is {concatenated_lora.shape}")
+        return concatenated_lora
+
+
+class LoRALinearColCol(nn.Module, AdapterModule):
+    """LoRA linear layer as introduced in `LoRA: Low-Rank Adaptation of Large Language Models <https://arxiv.org/abs/2106.09685>`_.
+
+    LoRA perturbs a given layer via a low-rank approximation where only
+    the rank decomposition matrices are trainable. In a linear layer instead of
+    :math:`x \\mapsto W_0x` a LoRALinear layer is defined as
+    :math:`x \\mapsto W_0x + (\\alpha / r)BAx`, where :math:`r` is the rank of
+    the matrices :math:`A` and :math:`B` and :math:`\\alpha` is a scaling factor.
+    As in the original implementation, we support dropout before multiplication
+    by the low-rank matrices.
+
+    Args:
+        in_dim (int): input dimension
+        out_dim (int): output dimension
+        rank (int): rank of the low-rank approximation
+        alpha (float): scaling factor for the low-rank approximation
+        dropout (float): dropout probability. Default: 0.0
+        use_bias (bool): whether to include bias in the original linear layer.
+            Default: False
+        quantize_base (bool): Whether to quantize base linear weight or not.
+            Default: False
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        rank: [int],
+        alpha: [float],
+        device_mesh: DeviceMesh,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        quantize_base: bool = False,
+        bsz: int = 1,
+    ):
+        super().__init__()
+        self.in_dim = in_dim
+        self.rank = rank
+        self.alpha = alpha
+        self.out_dim = out_dim
+        self.use_bias = use_bias
+        self._quantize_base = quantize_base
+        self.bsz = bsz
+        self.device_mesh = device_mesh
+        weight, bias = self._create_weight_and_bias()
+        # 'self.disabled' is a flag showing whether to turn off LoRA adapters,
+        # this can be used in DPO for treating the lora adapters as the policy model
+        # and disabling it to treat the base model as the reference model
+        self.disabled = False
+        self.register_parameter("weight", nn.Parameter(weight))
+        self.register_parameter(
+            "bias", nn.Parameter(bias) if bias is not None else None
+        )
+        self.dropout = nn.Dropout(p=dropout)
+
+        # self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
+        # self.lora_b = nn.Linear(in_features=sum(self.rank), out_features=out_dim, bias=False)
+
+        # Initialize ModuleLists for lora_a and lora_b
+        self.lora_a = nn.ModuleList()
+        self.lora_b = nn.ModuleList()
+        for r in self.rank:
+            # Standard initialization without DTensor.from_local
+            local_lora_a = nn.Linear(self.in_dim, r, bias=False).to(device_mesh.device_type)
+            self.lora_a.append(local_lora_a)
+
+            local_lora_b = nn.Linear(r, self.out_dim, bias=False).to(device_mesh.device_type)
+            self.lora_b.append(local_lora_b)
+
+        self.world_size, self.device_rank = utils.get_world_size_and_rank()
+
+        assert len(self.rank) % self.world_size == 0, "Must evenly divide num lora adapters and world size"
+        # Create a rank-specific mask for the weight matrix
+        self.start_row = sum(self.rank[:self.device_rank])
+        self.end_row = sum(self.rank[:self.device_rank]) + self.rank[self.device_rank]
+
+
+        self.merged = False
+        self.initialize_parameters()
+
+    def initialize_parameters(self):
+        # Initialize as in
+        # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
+        _lora_a_list_init_params(self.lora_a)
+        _lora_b_list_init_params(self.lora_b)
+
+
+    def _create_weight_and_bias(self):
+        """
+        Creates a linear weight and bias tensor, using NF4 dtype if we're quantizing
+        (indicated via quantize_base=True).
+        """
+        in_dim, out_dim, use_bias = self.in_dim, self.out_dim, self.use_bias
+        linear = nn.Linear(in_features=in_dim, out_features=out_dim, bias=use_bias)
+        weight = linear.weight if not self._quantize_base else to_nf4(linear.weight)
+        bias = None
+        if self.use_bias:
+            if self._quantize_base:
+                raise NotImplementedError(
+                    "Quantized LoRALinear does not support bias at the moment."
+                )
+            bias = linear.bias
+        return weight, bias
+
+    def adapter_params(self) -> List[str]:
+        """
+        Return lora_a.weight and lora_b.weight as adapter params.
+        If bias is enabled, also return lora_a.bias and lora_b.bias.
+        """
+        # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
+        # in this module change.
+        # adapter_params = ["lora_a.weight", "lora_b.weight"]
+
+        adapter_params = []
+
+        for i, (lora_a, lora_b) in enumerate(zip(self.lora_a, self.lora_b)):
+            # Access the weights of each LoRA adapter in the ModuleList
+            adapter_params.append(f"lora_a.{i}.weight")
+            adapter_params.append(f"lora_b.{i}.weight")
+
+            # If the LoRA layers have bias (if added in the future), include them as well
+            if lora_a.bias is not None:
+                adapter_params.append(f"lora_a.{i}.bias")
+            if lora_b.bias is not None:
+                adapter_params.append(f"lora_b.{i}.bias")
+
+        return adapter_params
+
+    def forward(self, x: Tensor, activated: int = 0):
+        # Base model computation with column-partitioned base weight (W1 equivalent)
+        if self._quantize_base:
+            out = linear_nf4(input=x, weight=self.weight)
+        else:
+            out = F.linear(x, self.weight, None)
+
+        if self.disabled:
+            return out, []
+
+        bsz = x.shape[0] // len(self.rank)
+        if bsz == 0:
+            raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
+
+        lora_outs = []
+
+        # Process each LoRA adapter for W1 equivalent
+        for i in range(len(self.rank)):
+            input_i = x[i * bsz : (i + 1) * bsz, ...]
+
+            # LoRA A1 (column-partitioned), apply dropout and projection
+            input_i = self.dropout(input_i)
+            print(f"input shape is {input_i.shape}, lora_a[{i}] weight shape is {self.lora_a[i].weight.shape}")
+            # print("get input")
+            lora_a_out_i = self.lora_a[i](input_i)
+            print(f"finish lora a with shape {lora_a_out_i.shape}")
+            # Replace DTensor.all_gather with torch.distributed.all_gather
+            gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_lora_a_out, lora_a_out_i)
+            lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
+
+            # LoRA B1 (column-partitioned) for QKV projection
+            print("start lora b")
+            lora_b_out_i = self.lora_b[i](lora_a_out_i)
+            print("finish lora b")
+
+            # Scale LoRA output
+            scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
+
+            # Combine with base model output
+            base_out_i = out[i * bsz : (i + 1) * bsz, ...]
+            base_out_i = base_out_i.to(scaled_lora_out_i.device)
+            lora_outs.append(base_out_i + scaled_lora_out_i)
+
+        concatenated_lora = torch.cat(lora_outs, dim=0)
+        return concatenated_lora
+
+    
+
+class LoRALinearRowCol(nn.Module, AdapterModule):
+    """LoRA linear layer as introduced in `LoRA: Low-Rank Adaptation of Large Language Models <https://arxiv.org/abs/2106.09685>`_.
+
+    LoRA perturbs a given layer via a low-rank approximation where only
+    the rank decomposition matrices are trainable. In a linear layer instead of
+    :math:`x \\mapsto W_0x` a LoRALinear layer is defined as
+    :math:`x \\mapsto W_0x + (\\alpha / r)BAx`, where :math:`r` is the rank of
+    the matrices :math:`A` and :math:`B` and :math:`\\alpha` is a scaling factor.
+    As in the original implementation, we support dropout before multiplication
+    by the low-rank matrices.
+
+    Args:
+        in_dim (int): input dimension
+        out_dim (int): output dimension
+        rank (int): rank of the low-rank approximation
+        alpha (float): scaling factor for the low-rank approximation
+        dropout (float): dropout probability. Default: 0.0
+        use_bias (bool): whether to include bias in the original linear layer.
+            Default: False
+        quantize_base (bool): Whether to quantize base linear weight or not.
+            Default: False
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        rank: [int],
+        alpha: [float],
+        device_mesh: DeviceMesh,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        quantize_base: bool = False,
+        bsz: int = 1,
+    ):
+        super().__init__()
+        self.in_dim = in_dim
+        self.rank = rank
+        self.alpha = alpha
+        self.out_dim = out_dim
+        self.use_bias = use_bias
+        self._quantize_base = quantize_base
+        self.bsz = bsz
+        self.device_mesh = device_mesh
+        weight, bias = self._create_weight_and_bias()
+        # 'self.disabled' is a flag showing whether to turn off LoRA adapters,
+        # this can be used in DPO for treating the lora adapters as the policy model
+        # and disabling it to treat the base model as the reference model
+        self.disabled = False
+        self.register_parameter("weight", nn.Parameter(weight))
+        self.register_parameter(
+            "bias", nn.Parameter(bias) if bias is not None else None
+        )
+        self.dropout = nn.Dropout(p=dropout)
+
+        # self.lora_a = nn.Linear(in_features=in_dim, out_features=sum(self.rank), bias=False)
+        # self.lora_b = nn.Linear(in_features=sum(self.rank), out_features=out_dim, bias=False)
+
+        # Initialize ModuleLists for lora_a and lora_b
+        self.lora_a = nn.ModuleList()
+        self.lora_b = nn.ModuleList()
+        for r in self.rank:
+            # Standard initialization without DTensor.from_local
+            local_lora_a = nn.Linear(self.in_dim, r, bias=False).to(device_mesh.device_type)
+            self.lora_a.append(local_lora_a)
+
+            local_lora_b = nn.Linear(r, self.out_dim, bias=False).to(device_mesh.device_type)
+            self.lora_b.append(local_lora_b)
+
+
+        self.world_size, self.device_rank = utils.get_world_size_and_rank()
+
+        assert len(self.rank) % self.world_size == 0, "Must evenly divide num lora adapters and world size"
+        # Create a rank-specific mask for the weight matrix
+        self.start_row = sum(self.rank[:self.device_rank])
+        self.end_row = sum(self.rank[:self.device_rank]) + self.rank[self.device_rank]
+
+
+        self.merged = False
+        self.initialize_parameters()
+
+    def initialize_parameters(self):
+        # Initialize as in
+        # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
+        _lora_a_list_init_params(self.lora_a)
+        _lora_b_list_init_params(self.lora_b)
+
+
+    def _create_weight_and_bias(self):
+        """
+        Creates a linear weight and bias tensor, using NF4 dtype if we're quantizing
+        (indicated via quantize_base=True).
+        """
+        in_dim, out_dim, use_bias = self.in_dim, self.out_dim, self.use_bias
+        linear = nn.Linear(in_features=in_dim, out_features=out_dim, bias=use_bias)
+        weight = linear.weight if not self._quantize_base else to_nf4(linear.weight)
+        bias = None
+        if self.use_bias:
+            if self._quantize_base:
+                raise NotImplementedError(
+                    "Quantized LoRALinear does not support bias at the moment."
+                )
+            bias = linear.bias
+        return weight, bias
+
+    def adapter_params(self) -> List[str]:
+        """
+        Return lora_a.weight and lora_b.weight as adapter params.
+        If bias is enabled, also return lora_a.bias and lora_b.bias.
+        """
+        # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
+        # in this module change.
+        # adapter_params = ["lora_a.weight", "lora_b.weight"]
+
+        adapter_params = []
+
+        for i, (lora_a, lora_b) in enumerate(zip(self.lora_a, self.lora_b)):
+            # Access the weights of each LoRA adapter in the ModuleList
+            adapter_params.append(f"lora_a.{i}.weight")
+            adapter_params.append(f"lora_b.{i}.weight")
+
+            # If the LoRA layers have bias (if added in the future), include them as well
+            if lora_a.bias is not None:
+                adapter_params.append(f"lora_a.{i}.bias")
+            if lora_b.bias is not None:
+                adapter_params.append(f"lora_b.{i}.bias")
+
+        return adapter_params
+
+    def forward(self, x: Tensor, activated: int = 0):
+        # Base model computation with row-partitioned base weight (W2 equivalent)
+        if self._quantize_base:
+            out = linear_nf4(input=x, weight=self.weight)
+        else:
+            out = F.linear(x, self.weight, None)
+
+        if self.disabled:
+            return out, []
+
+        bsz = x.shape[0] // len(self.rank)
+        if bsz == 0:
+            raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
+
+        lora_outs = []
+
+        for i in range(len(self.rank)):
+            input_i = x[i * bsz : (i + 1) * bsz, ...]
+
+            # LoRA A2 (row-partitioned), apply dropout and projection
+            input_i = self.dropout(input_i)
+            lora_a_out_i = self.lora_a[i](input_i)
+
+            # All-reduce after A2 to accumulate across ranks
+            dist.all_reduce(lora_a_out_i, op=dist.ReduceOp.SUM)
+
+            # LoRA B2 (column-partitioned) for output projection
+            lora_b_out_i = self.lora_b[i](lora_a_out_i)
+
+            # Scale LoRA output
+            scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
+
+            # Combine with base model output
+            base_out_i = out[i * bsz : (i + 1) * bsz, ...]
+            base_out_i = base_out_i.to(scaled_lora_out_i.device)
+            lora_outs.append(base_out_i + scaled_lora_out_i)
+
+        concatenated_lora = torch.cat(lora_outs, dim=0)
+        return concatenated_lora
