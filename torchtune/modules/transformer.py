@@ -8,6 +8,7 @@ from typing import Optional, List, Union
 
 import torch
 from torch import nn, Tensor
+from torch.distributed.tensor import Replicate, DTensor, Shard
 
 from torchtune.modules import CausalSelfAttention, KVCache
 from torch.utils.checkpoint import checkpoint
@@ -227,11 +228,17 @@ class TransformerDecoder(nn.Module):
         # input tensor of shape [b, s]
         # print("gets token shape")
         bsz, seq_len = tokens.shape
-        print(f"token shape is {bsz, seq_len}")
+        print(f"token shape is {bsz, seq_len} type is {type(tokens)}")
 
         # shape: [b, s, d]
         h = self.tok_embeddings(tokens)
         print(f"finish embedding layer with shape {h.shape}")
+
+        # if not isinstance(h, DTensor):
+        #     h = DTensor.from_local(h, device_mesh=self.device_mesh, placements=[Shard(1)])
+
+        # h = h.redistribute(placements=[Replicate()])
+        # print(f"redistribute to {h.shape}")
 
         if self.causal_mask is not None:
             if input_pos is None:

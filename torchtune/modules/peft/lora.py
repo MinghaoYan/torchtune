@@ -546,19 +546,19 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
             # print(f"local lora a with shape {lora_a_out_i_local.shape}")
 
-            # gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
-            # dist.all_gather(gathered_lora_a_out, lora_a_out_i_local)
+            gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_lora_a_out, lora_a_out_i)
 
-            # lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
-            # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
+            lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
+            print(f"finish lora a gather with shape {lora_a_out_i.shape}")
 
 
             # Directly gather the DTensor without `to_local()`
-            gathered_lora_a_out = lora_a_out_i.redistribute(
-                device_mesh=self.device_mesh,
-                placements=[Shard(1), Replicate()]  # Adjust this if your shard is on a different dimension
-            )
-            print(f"finish lora a gather with shape {gathered_lora_a_out.shape}")
+            # gathered_lora_a_out = lora_a_out_i.redistribute(
+            #     device_mesh=self.device_mesh,
+            #     placements=[Shard(1), Replicate()]  # Adjust this if your shard is on a different dimension
+            # )
+            # print(f"finish lora a gather with shape {gathered_lora_a_out.shape}")
 
 
             # Convert the output of lora_a to DTensor for distributed operation
@@ -575,9 +575,9 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
             # Combine with base model output
-            print(f"out shape is {out.shape}")
+            print(f"out shape is {out.shape}, type is {type(out)}")
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-            print(f"base_out_i shape is {base_out_i.shape}")
+            print(f"base_out_i shape is {base_out_i.shape}, type is {type(base_out_i)}")
             base_out_i = base_out_i.to(scaled_lora_out_i.device)
             lora_outs.append(base_out_i + scaled_lora_out_i)
 

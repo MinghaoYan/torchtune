@@ -14,7 +14,7 @@ from torch import nn
 from torch.nn import Parameter
 from torch.distributed import destroy_process_group, init_process_group
 import torch.distributed.tensor.parallel as tp
-from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module, SequenceParallel, ParallelStyle
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module, SequenceParallel, ParallelStyle, PrepareModuleInput
 from torch.distributed.tensor.placement_types import Placement
 from torch.distributed.tensor import Replicate, Shard, DTensor, distribute_tensor
 from torch.distributed._tensor import DeviceMesh, distribute_module
@@ -249,7 +249,7 @@ class LoRALinearColColParallel(ParallelStyle):
         #     module.register_parameter("weight", nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)])))
         # for name, param in module.named_parameters():
         if hasattr(module, 'weight') and module.weight is not None:
-            print(module)
+            # print(module)
             dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)]))
             module.register_parameter("weight", dist_param)
 
@@ -673,7 +673,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         full_tp_plan = {
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1),
+                output_layouts=Replicate(),  # Ensure weights are replicated for embedding
             ),
             "norm": SequenceParallel(),
             "output": ColwiseParallel(
@@ -924,8 +924,8 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     placements=[Replicate()]  # Ensure full replication across ranks
                 )
 
-                # Move to the correct device
-                tokens_repeated = tokens_repeated.to(self.device_mesh.device_type)
+                # # Move to the correct device
+                # tokens_repeated = tokens_repeated.to(self.device_mesh.device_type)
 
                 # Repeat for labels, mask, and input_pos
                 shards = labels_repeated.chunk(self.device_mesh.size(0), dim=0)
