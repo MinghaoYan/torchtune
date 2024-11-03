@@ -15,7 +15,7 @@ from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 from torchtune.modules.peft.peft_utils import AdapterModule
 from torchtune import utils
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed._tensor import DTensor, Shard, DeviceMesh, distribute_tensor
+from torch.distributed._tensor import DTensor, Shard, DeviceMesh, distribute_tensor, Replicate
 
 import torch.distributed as dist
 
@@ -446,11 +446,15 @@ class LoRALinearColCol(nn.Module, AdapterModule):
         self.lora_b = nn.ModuleList()
         for r in self.rank:
             # Standard initialization without DTensor.from_local
-            local_lora_a = nn.Linear(self.in_dim, r, bias=False).to(device_mesh.device_type)
+            local_lora_a = nn.Linear(self.in_dim, r, bias=False)
             self.lora_a.append(local_lora_a)
+            if not local_lora_a.weight.is_leaf:
+                print(f"lora_a weight is leaf: {local_lora_a.weight.is_leaf}")
 
-            local_lora_b = nn.Linear(r, self.out_dim, bias=False).to(device_mesh.device_type)
+            local_lora_b = nn.Linear(r, self.out_dim, bias=False)
             self.lora_b.append(local_lora_b)
+            if not local_lora_b.weight.is_leaf:
+                print(f"lora_b weight is leaf: {local_lora_b.weight.is_leaf}")
 
         self.world_size, self.device_rank = utils.get_world_size_and_rank()
 
@@ -536,15 +540,26 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             print(f"input shape is {input_i.shape}, lora_a[{i}] weight shape is {self.lora_a[i].weight.shape}")
             # print("get input")
             lora_a_out_i = self.lora_a[i](input_i)
-            print(f"finish lora a with shape {lora_a_out_i.shape}")
+            print(f"finish lora a with shape {lora_a_out_i.shape}, type is {type(lora_a_out_i)}")
             
-            # Convert DTensor to local tensor before all_gather
-            lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
+            # # Convert DTensor to local tensor before all_gather
+            # lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
+            # print(f"local lora a with shape {lora_a_out_i_local.shape}")
 
-            gathered_lora_a_out = [torch.empty_like(lora_a_out_i_local) for _ in range(dist.get_world_size())]
-            dist.all_gather(gathered_lora_a_out, lora_a_out_i_local)
-            
-            lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
+            # gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
+            # dist.all_gather(gathered_lora_a_out, lora_a_out_i_local)
+
+            # lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
+            # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
+
+
+            # Directly gather the DTensor without `to_local()`
+            gathered_lora_a_out = lora_a_out_i.redistribute(
+                device_mesh=self.device_mesh,
+                placements=[Shard(1), Replicate()]  # Adjust this if your shard is on a different dimension
+            )
+            print(f"finish lora a gather with shape {gathered_lora_a_out.shape}")
+
 
             # Convert the output of lora_a to DTensor for distributed operation
             lora_a_out_i_dtensor = distribute_tensor(
@@ -552,15 +567,17 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             )
 
             # LoRA B1 (column-partitioned) for QKV projection
-            print("start lora b")
+            print(f"lora a out shape is {lora_a_out_i_dtensor.shape}")
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-            print("finish lora b")
+            print(f"lora b out shape is {lora_b_out_i.shape}")
 
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
             # Combine with base model output
+            print(f"out shape is {out.shape}")
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
+            print(f"base_out_i shape is {base_out_i.shape}")
             base_out_i = base_out_i.to(scaled_lora_out_i.device)
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
@@ -632,10 +649,10 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
         self.lora_b = nn.ModuleList()
         for r in self.rank:
             # Standard initialization without DTensor.from_local
-            local_lora_a = nn.Linear(self.in_dim, r, bias=False).to(device_mesh.device_type)
+            local_lora_a = nn.Linear(self.in_dim, r, bias=False)
             self.lora_a.append(local_lora_a)
 
-            local_lora_b = nn.Linear(r, self.out_dim, bias=False).to(device_mesh.device_type)
+            local_lora_b = nn.Linear(r, self.out_dim, bias=False)
             self.lora_b.append(local_lora_b)
 
 

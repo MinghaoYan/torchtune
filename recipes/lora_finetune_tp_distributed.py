@@ -15,6 +15,7 @@ from torch.nn import Parameter
 from torch.distributed import destroy_process_group, init_process_group
 import torch.distributed.tensor.parallel as tp
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module, SequenceParallel, ParallelStyle
+from torch.distributed.tensor.placement_types import Placement
 from torch.distributed.tensor import Replicate, Shard, DTensor, distribute_tensor
 from torch.distributed._tensor import DeviceMesh, distribute_module
 from torch.optim import Optimizer
@@ -41,133 +42,340 @@ import torch.distributed as dist
 log = utils.get_logger("DEBUG")
 
 
-class InterleavedLoRALinearParallel(ParallelStyle):
-    def __init__(self, input_shard_dim=1, output_shard_dim=0):
-        super().__init__()
-        self.input_shard_dim = input_shard_dim
-        self.output_shard_dim = output_shard_dim
+# class InterleavedLoRALinearParallel(ParallelStyle):
+#     def __init__(self, input_shard_dim=1, output_shard_dim=0):
+#         super().__init__()
+#         self.input_shard_dim = input_shard_dim
+#         self.output_shard_dim = output_shard_dim
 
-    def _apply(self, module, device_mesh):
-        # Shard the base weight across devices
-        if hasattr(module, 'weight') and module.weight is not None:
-            # Split and shard the weight tensor
-            shards = module.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
-            local_shard = shards[device_mesh.get_rank()]
-            module.weight = Parameter(
-                DTensor.from_local(
-                    local_shard.contiguous(),  # Ensure the tensor is contiguous
-                    device_mesh=device_mesh,
-                    placements=[Shard(self.output_shard_dim)]
-                )
-            )
+#     def _apply(self, module, device_mesh):
+#         # Shard the base weight across devices
+#         if hasattr(module, 'weight') and module.weight is not None:
+#             # Split and shard the weight tensor
+#             shards = module.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+#             local_shard = shards[device_mesh.get_rank()]
+#             module.weight = Parameter(
+#                 DTensor.from_local(
+#                     local_shard.contiguous(),  # Ensure the tensor is contiguous
+#                     device_mesh=device_mesh,
+#                     placements=[Shard(self.output_shard_dim)]
+#                 )
+#             )
 
-        # Shard lora_a weights
-        for lora_a in module.lora_a:
-            if lora_a.weight is not None:
-                shards = lora_a.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
-                local_shard = shards[device_mesh.get_rank()]
-                lora_a.weight = Parameter(
-                    DTensor.from_local(
-                        local_shard.contiguous(),
-                        device_mesh=device_mesh,
-                        placements=[Shard(self.input_shard_dim)]
-                    )
-                )
+#         # Shard lora_a weights
+#         for lora_a in module.lora_a:
+#             if lora_a.weight is not None:
+#                 shards = lora_a.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
+#                 local_shard = shards[device_mesh.get_rank()]
+#                 lora_a.weight = Parameter(
+#                     DTensor.from_local(
+#                         local_shard.contiguous(),
+#                         device_mesh=device_mesh,
+#                         placements=[Shard(self.input_shard_dim)]
+#                     )
+#                 )
 
-        # Shard lora_b weights
-        for lora_b in module.lora_b:
-            if lora_b.weight is not None:
-                shards = lora_b.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
-                local_shard = shards[device_mesh.get_rank()]
-                lora_b.weight = Parameter(
-                    DTensor.from_local(
-                        local_shard.contiguous(),
-                        device_mesh=device_mesh,
-                        placements=[Shard(self.output_shard_dim)]
-                    )
-                )
+#         # Shard lora_b weights
+#         for lora_b in module.lora_b:
+#             if lora_b.weight is not None:
+#                 shards = lora_b.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
+#                 local_shard = shards[device_mesh.get_rank()]
+#                 lora_b.weight = Parameter(
+#                     DTensor.from_local(
+#                         local_shard.contiguous(),
+#                         device_mesh=device_mesh,
+#                         placements=[Shard(self.output_shard_dim)]
+#                     )
+#                 )
+
+
+# class LoRALinearColColParallel(ParallelStyle):
+#     def __init__(self, input_shard_dim=1, output_shard_dim=0):
+#         super().__init__()
+#         self.input_shard_dim = input_shard_dim
+#         self.output_shard_dim = output_shard_dim
+
+#     def _partition_lora_fn(self, module, device_mesh):
+#         """Manually partition LoRA weights in a Colwise manner."""
+#         rank = device_mesh.get_rank()
+#         world_size = device_mesh.size(0)
+        
+#         if hasattr(module, 'weight') and module.weight is not None:
+#             shards = module.weight.chunk(world_size, dim=self.output_shard_dim)
+#             local_weight_shard = shards[rank]
+#             dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.output_shard_dim)]))
+#             module.register_parameter("weight", dist_weight)
+#             # print(f"[Rank {rank}] Assigned shard shape for {name} after distribute_tensor: {dist_param.shape}")
+
+#     def _apply(self, module, device_mesh):
+#         rank = device_mesh.get_rank()
+#         world_size = device_mesh.size(0)
+
+#         # Distribute the main weight matrix if needed
+#         if hasattr(module, 'weight') and module.weight is not None:
+#             shards = module.weight.chunk(world_size, dim=self.output_shard_dim)
+#             local_weight_shard = shards[rank]
+#             dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.output_shard_dim)]))
+#             module.register_parameter("weight", dist_weight)
+#             # print(f"[Rank {rank}] Main weight shard shape: {dist_weight.shape}")
+
+#         # Apply column-wise partitioning to each LoRA module (lora_a and lora_b)
+#         for lora_a in module.lora_a:
+#             ColwiseParallel._apply(ColwiseParallel, lora_a, device_mesh)
+
+#         for lora_b in module.lora_b:
+#             ColwiseParallel._apply(ColwiseParallel, lora_b, device_mesh)
+
+
+# class LoRALinearRowColParallel(ParallelStyle):
+#     def __init__(self, input_shard_dim=1, output_shard_dim=0):
+#         super().__init__()
+#         self.input_shard_dim = input_shard_dim
+#         self.output_shard_dim = output_shard_dim
+
+#     def _partition_lora_fn(self, lora_module, device_mesh, shard_dim):
+#         """Manually partition LoRA weights in a specified manner."""
+#         rank = device_mesh.get_rank()
+#         world_size = device_mesh.size(0)
+        
+#         for name, param in lora_module.named_parameters():
+#             # Manually chunk the tensor along the specified dimension
+#             shards = param.chunk(world_size, dim=shard_dim)
+#             local_shard = shards[rank].detach()  # Detach to ensure it's a leaf tensor
+            
+#             # Apply distribute_tensor to the local shard only
+#             dist_param = nn.Parameter(distribute_tensor(local_shard, device_mesh, [Shard(shard_dim)]))
+#             lora_module.register_parameter(name, dist_param)
+
+#     def _apply(self, module, device_mesh):
+#         rank = device_mesh.get_rank()
+#         world_size = device_mesh.size(0)
+
+#         # Apply row-wise partitioning to the main weight matrix
+#         if hasattr(module, 'weight') and module.weight is not None:
+#             weight_shards = module.weight.chunk(world_size, dim=self.input_shard_dim)
+#             local_weight_shard = weight_shards[rank]
+#             dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.input_shard_dim)]))
+#             module.register_parameter("weight", dist_weight)
+
+#         # Apply row-wise partitioning to each LoRA module's `lora_a`
+#         for lora_a in module.lora_a:
+#             RowwiseParallel._apply(RowwiseParallel, lora_a, device_mesh)
+
+#         for lora_b in module.lora_b:
+#             ColwiseParallel._apply(ColwiseParallel, lora_b, device_mesh)
 
 
 class LoRALinearColColParallel(ParallelStyle):
-    def __init__(self, input_shard_dim=1, output_shard_dim=0):
+    """
+    Partition a compatible nn.Module in a column-wise fashion. Currently supports nn.Linear and nn.Embedding.
+    Users can compose it together with RowwiseParallel to achieve the sharding of more complicated modules.
+    (i.e. MLP, Attention)
+
+    Keyword Args:
+        input_layouts (Placement, optional):
+            The DTensor layout of input tensor for the nn.Module, this is used to annotate the input tensor to
+            become a DTensor. If not specified, we assume the input tensor to be replicated.
+        output_layouts (Placement, optional):
+            The DTensor layout of the output for the nn.Module, this is used to ensure the output of the nn.Module
+            with the user desired layout. If not specified, the output tensor is sharded on the last dimension.
+        use_local_output (bool, optional):
+            Whether to use local :class:`torch.Tensor` instead of :class:`DTensor` for the module output, default: True.
+    Returns:
+        A :class:`ParallelStyle` object that represents Colwise sharding of the nn.Module.
+
+    Example::
+        >>> # xdoctest: +SKIP(failing)
+        >>> from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel
+        >>> from torch.distributed.device_mesh import init_device_mesh
+        >>> ...
+        >>> m = Model(...)  # m is a nn.Module that contains a "w1" nn.Linear submodule
+        >>> tp_mesh = init_device_mesh("cuda", (8,))
+        >>>
+        >>> # By default, the input of the "w1" Linear will be converted to Replicated DTensor
+        >>> # and the output of "w1" will return :class:`torch.Tensor` that shards on the last dim.
+        >>>
+        >>> sharded_mod = parallelize_module(m, tp_mesh, {"w1": ColwiseParallel()})
+        >>> ...
+
+    .. note:: By default ``ColwiseParallel`` output is sharded on the last dimension if the ``output_layouts`` not
+        specified, if there're operators that require specific tensor shape (i.e. before the paired ``RowwiseParallel``),
+        keep in mind that if the output is sharded the operator might need to be adjusted to the sharded size.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_layouts: Optional[Placement] = None,
+        output_layouts: Optional[Placement] = None,
+        use_local_output: bool = True,
+    ):
         super().__init__()
-        self.input_shard_dim = input_shard_dim
-        self.output_shard_dim = output_shard_dim
+        self.input_layouts = (input_layouts or Replicate(),)
+        self.output_layouts = (output_layouts or Shard(-1),)
+        # colwise linear runtime sharding (desired sharding):
+        # 1. requires replicate input
+        # 2. shard output on last dim
+        self.desired_input_layouts = (Replicate(),)
+        self.use_local_output = use_local_output
 
-    def _partition_lora_fn(self, name, lora_module, device_mesh):
-        """Manually partition LoRA weights in a Colwise manner."""
-        rank = device_mesh.get_rank()
-        world_size = device_mesh.size(0)
-        
-        for name, param in lora_module.named_parameters():
-            # Manually chunk the tensor along the specified dimension
-            shards = param.chunk(world_size, dim=self.output_shard_dim)
-            local_shard = shards[rank].detach()  # Detach to ensure it's a leaf tensor
-            # print(f"[Rank {rank}] Local shard shape for {name}: {local_shard.shape}")
+    @staticmethod
+    def _prepare_input_fn(
+        input_layouts, desired_input_layouts, mod, inputs, device_mesh
+    ):
+        # TODO: figure out dynamo support for instance method and switch this to instance method
 
-            # Apply distribute_tensor to the local shard only
-            dist_param = nn.Parameter(distribute_tensor(local_shard, device_mesh, [Shard(self.output_shard_dim)]))
-            lora_module.register_parameter(name, dist_param)
-            # print(f"[Rank {rank}] Assigned shard shape for {name} after distribute_tensor: {dist_param.shape}")
+        # annotate module input placements/sharding with input_layouts
+        input_tensor = inputs[0]
+        if not isinstance(input_tensor, DTensor):
+            input_tensor = DTensor.from_local(
+                input_tensor, device_mesh, input_layouts, run_check=False
+            )
 
-    def _apply(self, module, device_mesh):
-        rank = device_mesh.get_rank()
-        world_size = device_mesh.size(0)
+        # transform the input layouts to the desired layouts of ColwiseParallel
+        if input_layouts != desired_input_layouts:
+            input_tensor = input_tensor.redistribute(
+                placements=desired_input_layouts, async_op=True
+            )
+        return input_tensor
 
-        # Distribute the main weight matrix if needed
+    def _partition_linear_fn(self, name, module, device_mesh):
+        # colwise shard weight/bias to Shard(0), weight be Shard(0)
+        # means Colwise as Linear is input * weight^T + bias, where
+        # weight would become Shard(1)
+        # if isinstance(module, nn.Dropout) or isinstance(module, nn.ModuleList):
+        #     return
+        # else:
+        #     module.register_parameter("weight", nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)])))
+        # for name, param in module.named_parameters():
         if hasattr(module, 'weight') and module.weight is not None:
-            shards = module.weight.chunk(world_size, dim=self.output_shard_dim)
-            local_weight_shard = shards[rank]
-            dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.output_shard_dim)]))
-            module.register_parameter("weight", dist_weight)
-            # print(f"[Rank {rank}] Main weight shard shape: {dist_weight.shape}")
+            print(module)
+            dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)]))
+            module.register_parameter("weight", dist_param)
 
-        # Apply column-wise partitioning to each LoRA module (lora_a and lora_b)
-        for lora_a in module.lora_a:
-            self._partition_lora_fn("lora_a", lora_a, device_mesh)
 
-        for lora_b in module.lora_b:
-            self._partition_lora_fn("lora_b", lora_b, device_mesh)
+    @staticmethod
+    def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
+        # outputs is a shard on last dimension DTensor, i.e. Shard(-1)
+        if outputs.placements != output_layouts:
+            outputs = outputs.redistribute(placements=output_layouts, async_op=True)
+        # back to local tensor
+        return outputs.to_local() if use_local_output else outputs
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+
+        return distribute_module(
+            module,
+            device_mesh,
+            self._partition_linear_fn,
+            partial(
+                self._prepare_input_fn, self.input_layouts, self.desired_input_layouts
+            ),
+            partial(
+                self._prepare_output_fn, self.output_layouts, self.use_local_output
+            ),
+        )
 
 
 class LoRALinearRowColParallel(ParallelStyle):
-    def __init__(self, input_shard_dim=1, output_shard_dim=0):
+    """
+    Partition a compatible nn.Module in a row-wise fashion. Currently supports nn.Linear and nn.Embedding.
+    Users can compose it with ColwiseParallel to achieve the sharding of more complicated modules.
+    (i.e. MLP, Attention)
+
+    Keyword Args:
+        input_layouts (Placement, optional):
+            The DTensor layout of input tensor for the nn.Module, this is used to annotate the input tensor to
+            become a DTensor. If not specified, we assume the input tensor to be sharded on the last dimension.
+        output_layouts (Placement, optional):
+            The DTensor layout of the output for the nn.Module, this is used to ensure the output of the nn.Module
+            with the user desired layout. If not specified, the output tensor is replicated.
+        use_local_output (bool, optional):
+            Whether to use local :class:`torch.Tensor` instead of :class:`DTensor` for the module output, default: True.
+    Returns:
+        A :class:`ParallelStyle` object that represents Rowwise sharding of the nn.Module.
+
+    Example::
+        >>> # xdoctest: +SKIP(failing)
+        >>> from torch.distributed.tensor.parallel import parallelize_module, RowwiseParallel
+        >>> from torch.distributed.device_mesh import init_device_mesh
+        >>> ...
+        >>> m = Model(...)  # m is a nn.Module that contains a "w2" nn.Linear submodule
+        >>> tp_mesh = init_device_mesh("cuda", (8,))
+        >>>
+        >>> # By default, the input of the "w2" Linear will be converted to DTensor that shards on the last dim
+        >>> # and the output of "w2" will return a replicated :class:`torch.Tensor`.
+        >>>
+        >>> sharded_mod = parallelize_module(m, tp_mesh, {"w2": RowwiseParallel()}),
+        >>> ...
+    """
+
+    def __init__(
+        self,
+        *,
+        input_layouts: Optional[Placement] = None,
+        output_layouts: Optional[Placement] = None,
+        use_local_output: bool = True,
+    ):
         super().__init__()
-        self.input_shard_dim = input_shard_dim
-        self.output_shard_dim = output_shard_dim
+        self.input_layouts = (input_layouts or Shard(-1),)
+        self.output_layouts = (output_layouts or Replicate(),)
+        self.use_local_output = use_local_output
 
-    def _partition_lora_fn(self, lora_module, device_mesh, shard_dim):
-        """Manually partition LoRA weights in a specified manner."""
-        rank = device_mesh.get_rank()
-        world_size = device_mesh.size(0)
+    @staticmethod
+    def _prepare_input_fn(
+        input_layouts, desired_input_layouts, mod, inputs, device_mesh
+    ):
+        input_tensor = inputs[0]
+        if not isinstance(input_tensor, DTensor):
+            input_tensor = DTensor.from_local(
+                input_tensor, device_mesh, input_layouts, run_check=False
+            )
+
+        if input_layouts != desired_input_layouts:
+            input_tensor = input_tensor.redistribute(
+                placements=desired_input_layouts, async_op=True
+            )
+        return input_tensor
+
+    def _partition_linear_fn(self, name, module, device_mesh):
+        # Rowwise shard weight to Shard(1), bias to Replicate(), weight be Shard(1)
+        # means Rowwise as nn.Linear is input * weight^T + bias, where
+        # weight would become Shard(0)
+        if isinstance(module, nn.Dropout) or isinstance(module, nn.ModuleList):
+            return
+        else:
+            module.register_parameter(
+                "weight",
+                nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(1)])),
+            )
+
+    @staticmethod
+    def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
+        # Rowwise sharding produces partial output, depending on output layouts:
+        # 1. to replicate -> allreduce
+        # 2. to shard -> reduce_scatter
+        if outputs.placements != output_layouts:
+            outputs = outputs.redistribute(placements=output_layouts, async_op=True)
+        # back to local tensor if use_local_output is True
+        return outputs.to_local() if use_local_output else outputs
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        partition_fn = self._partition_linear_fn
+        # rowwise linear runtime sharding requires input tensor shard on last dim
+        self.desired_input_layouts: Tuple[Placement, ...] = (Shard(-1),)
         
-        for name, param in lora_module.named_parameters():
-            # Manually chunk the tensor along the specified dimension
-            shards = param.chunk(world_size, dim=shard_dim)
-            local_shard = shards[rank].detach()  # Detach to ensure it's a leaf tensor
-            
-            # Apply distribute_tensor to the local shard only
-            dist_param = nn.Parameter(distribute_tensor(local_shard, device_mesh, [Shard(shard_dim)]))
-            lora_module.register_parameter(name, dist_param)
-
-    def _apply(self, module, device_mesh):
-        rank = device_mesh.get_rank()
-        world_size = device_mesh.size(0)
-
-        # Apply row-wise partitioning to the main weight matrix
-        if hasattr(module, 'weight') and module.weight is not None:
-            weight_shards = module.weight.chunk(world_size, dim=self.input_shard_dim)
-            local_weight_shard = weight_shards[rank]
-            dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.input_shard_dim)]))
-            module.register_parameter("weight", dist_weight)
-
-        # Apply row-wise partitioning to each LoRA module's `lora_a`
-        for lora_a in module.lora_a:
-            self._partition_lora_fn(lora_a, device_mesh, shard_dim=self.input_shard_dim)
-
-        # Apply column-wise partitioning to each LoRA module's `lora_b`
-        for lora_b in module.lora_b:
-            self._partition_lora_fn(lora_b, device_mesh, shard_dim=self.output_shard_dim)
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn,
+            partial(
+                self._prepare_input_fn, self.input_layouts, self.desired_input_layouts
+            ),
+            partial(
+                self._prepare_output_fn, self.output_layouts, self.use_local_output
+            ),
+        )
 
 
 class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
@@ -449,7 +657,16 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         # Set trainable parameters
         self.adapter_params = get_adapter_params(model)
+
+        # Check if each parameter is a leaf
+        for name, param in model.named_parameters():
+            if not param.is_leaf:
+                print(f"{param} is not a leaf")
+
         set_trainable_params(model, self.adapter_params)
+        for name, param in model.named_parameters():
+            if not param.is_leaf:
+                print(f"after setting trainable params, {param} is not leaf")
 
         # Combined Tensor Parallelism plan
         # Base Tensor Parallelism plan
@@ -475,11 +692,28 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             # Include other attention projections if needed
             full_tp_plan[f"{layer_prefix}.attn.k_proj"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.attn.v_proj"] = LoRALinearColColParallel()
-            full_tp_plan[f"{layer_prefix}.attn.output_proj"] = LoRALinearRowColParallel()
+            full_tp_plan[f"{layer_prefix}.attn.output_proj"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.mlp_norm"] = SequenceParallel(sequence_dim=1)
             full_tp_plan[f"{layer_prefix}.mlp.w1"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.mlp.w2"] = LoRALinearColColParallel()
-            full_tp_plan[f"{layer_prefix}.mlp.w3"] = LoRALinearRowColParallel()
+            full_tp_plan[f"{layer_prefix}.mlp.w3"] = LoRALinearColColParallel()
+        
+            for idx in range(self.num_adapters):
+                full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.mlp.w1.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.mlp.w1.lora_b.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.mlp.w2.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.mlp.w2.lora_b.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.mlp.w3.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.mlp.w3.lora_b.{idx}"] = LoRALinearColColParallel()
+
 
         log.info("Start parallelizing layers")
         # print(f"{model}")
@@ -494,6 +728,8 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             print(f"[Rank {self.device_mesh.get_rank()}] LoRA A1[{i}] weight shape after parallelize_module: {lora_a.weight.shape}")
 
         log.info("Finish parallelizing module")
+
+        # set_trainable_params(model, self.adapter_params)
 
         if enable_activation_checkpointing:
             utils.set_activation_checkpointing(
@@ -675,12 +911,12 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 else:
                     input_pos_repeated = None
 
-                # max_seq_len = tokens_repeated.shape[1]
-                # if max_seq_len % self.device_mesh.size(0) != 0:
-                #     # Calculate padding to make sequence length divisible by the number of ranks
-                #     pad_len = self.device_mesh.size(0) - (max_seq_len % self.device_mesh.size(0))
-                #     tokens_repeated = F.pad(tokens_repeated, (0, 0, 0, pad_len))  # pad on sequence dimension
-
+                max_seq_len = tokens_repeated.shape[1]
+                if max_seq_len % self.device_mesh.size(0) != 0:
+                    # Calculate padding to make sequence length divisible by the number of ranks
+                    pad_len = self.device_mesh.size(0) - (max_seq_len % self.device_mesh.size(0))
+                    tokens_repeated = F.pad(tokens_repeated, (0, pad_len))  # pad on sequence dimension
+                print(f"tokens_repeated shape is {tokens_repeated.shape}")
                 # Ensure tokens_repeated is fully replicated before embedding layer
                 tokens_repeated = DTensor.from_local(
                     tokens_repeated.contiguous(),
