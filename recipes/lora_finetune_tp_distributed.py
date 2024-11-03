@@ -100,17 +100,15 @@ class LoRALinearColColParallel(ParallelStyle):
         world_size = device_mesh.size(0)
         
         for name, param in lora_module.named_parameters():
-            print(f"Original param shape for {name} on rank {rank}: {param.shape}")
-
             # Manually chunk the tensor along the specified dimension
             shards = param.chunk(world_size, dim=self.output_shard_dim)
             local_shard = shards[rank].detach()  # Detach to ensure it's a leaf tensor
-            print(f"[Rank {rank}] Local shard shape for {name}: {local_shard.shape}")
+            # print(f"[Rank {rank}] Local shard shape for {name}: {local_shard.shape}")
 
             # Apply distribute_tensor to the local shard only
             dist_param = nn.Parameter(distribute_tensor(local_shard, device_mesh, [Shard(self.output_shard_dim)]))
             lora_module.register_parameter(name, dist_param)
-            print(f"[Rank {rank}] Assigned shard shape for {name} after distribute_tensor: {dist_param.shape}")
+            # print(f"[Rank {rank}] Assigned shard shape for {name} after distribute_tensor: {dist_param.shape}")
 
     def _apply(self, module, device_mesh):
         rank = device_mesh.get_rank()
@@ -122,7 +120,7 @@ class LoRALinearColColParallel(ParallelStyle):
             local_weight_shard = shards[rank]
             dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.output_shard_dim)]))
             module.register_parameter("weight", dist_weight)
-            print(f"[Rank {rank}] Main weight shard shape: {dist_weight.shape}")
+            # print(f"[Rank {rank}] Main weight shard shape: {dist_weight.shape}")
 
         # Apply column-wise partitioning to each LoRA module (lora_a and lora_b)
         for lora_a in module.lora_a:
@@ -138,43 +136,38 @@ class LoRALinearRowColParallel(ParallelStyle):
         self.input_shard_dim = input_shard_dim
         self.output_shard_dim = output_shard_dim
 
-    def _apply(self, module, device_mesh):
-        # Row-partitioning for LoRA A2
-        if hasattr(module, 'weight') and module.weight is not None:
-            weight_shards = module.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
-            local_weight_shard = weight_shards[device_mesh.get_rank()]
-            module.weight = Parameter(
-                DTensor.from_local(
-                    local_weight_shard.contiguous(),
-                    device_mesh=device_mesh,
-                    placements=[Shard(self.input_shard_dim)]
-                )
-            )
-    
-        for lora_a in module.lora_a:
-            if lora_a.weight is not None:
-                lora_a_shards = lora_a.weight.chunk(device_mesh.size(0), dim=self.input_shard_dim)
-                local_lora_a_shard = lora_a_shards[device_mesh.get_rank()]
-                lora_a.weight = Parameter(
-                    DTensor.from_local(
-                        local_lora_a_shard.contiguous(),
-                        device_mesh=device_mesh,
-                        placements=[Shard(self.input_shard_dim)]
-                    )
-                )
+    def _partition_lora_fn(self, lora_module, device_mesh, shard_dim):
+        """Manually partition LoRA weights in a specified manner."""
+        rank = device_mesh.get_rank()
+        world_size = device_mesh.size(0)
+        
+        for name, param in lora_module.named_parameters():
+            # Manually chunk the tensor along the specified dimension
+            shards = param.chunk(world_size, dim=shard_dim)
+            local_shard = shards[rank].detach()  # Detach to ensure it's a leaf tensor
+            
+            # Apply distribute_tensor to the local shard only
+            dist_param = nn.Parameter(distribute_tensor(local_shard, device_mesh, [Shard(shard_dim)]))
+            lora_module.register_parameter(name, dist_param)
 
-        # Column-partitioning for LoRA B2
+    def _apply(self, module, device_mesh):
+        rank = device_mesh.get_rank()
+        world_size = device_mesh.size(0)
+
+        # Apply row-wise partitioning to the main weight matrix
+        if hasattr(module, 'weight') and module.weight is not None:
+            weight_shards = module.weight.chunk(world_size, dim=self.input_shard_dim)
+            local_weight_shard = weight_shards[rank]
+            dist_weight = nn.Parameter(distribute_tensor(local_weight_shard, device_mesh, [Shard(self.input_shard_dim)]))
+            module.register_parameter("weight", dist_weight)
+
+        # Apply row-wise partitioning to each LoRA module's `lora_a`
+        for lora_a in module.lora_a:
+            self._partition_lora_fn(lora_a, device_mesh, shard_dim=self.input_shard_dim)
+
+        # Apply column-wise partitioning to each LoRA module's `lora_b`
         for lora_b in module.lora_b:
-            if lora_b.weight is not None:
-                lora_b_shards = lora_b.weight.chunk(device_mesh.size(0), dim=self.output_shard_dim)
-                local_lora_b_shard = lora_b_shards[device_mesh.get_rank()]
-                lora_b.weight = Parameter(
-                    DTensor.from_local(
-                        local_lora_b_shard.contiguous(),
-                        device_mesh=device_mesh,
-                        placements=[Shard(self.output_shard_dim)]
-                    )
-                )
+            self._partition_lora_fn(lora_b, device_mesh, shard_dim=self.output_shard_dim)
 
 
 class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):

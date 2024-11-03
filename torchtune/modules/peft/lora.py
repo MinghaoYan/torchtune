@@ -15,7 +15,7 @@ from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 from torchtune.modules.peft.peft_utils import AdapterModule
 from torchtune import utils
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed._tensor import DTensor, Shard, DeviceMesh
+from torch.distributed._tensor import DTensor, Shard, DeviceMesh, distribute_tensor
 
 import torch.distributed as dist
 
@@ -537,14 +537,23 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # print("get input")
             lora_a_out_i = self.lora_a[i](input_i)
             print(f"finish lora a with shape {lora_a_out_i.shape}")
-            # Replace DTensor.all_gather with torch.distributed.all_gather
-            gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
-            dist.all_gather(gathered_lora_a_out, lora_a_out_i)
+            
+            # Convert DTensor to local tensor before all_gather
+            lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
+
+            gathered_lora_a_out = [torch.empty_like(lora_a_out_i_local) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_lora_a_out, lora_a_out_i_local)
+            
             lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
+
+            # Convert the output of lora_a to DTensor for distributed operation
+            lora_a_out_i_dtensor = distribute_tensor(
+                lora_a_out_i, device_mesh=self.device_mesh, placements=[Shard(1)]
+            )
 
             # LoRA B1 (column-partitioned) for QKV projection
             print("start lora b")
-            lora_b_out_i = self.lora_b[i](lora_a_out_i)
+            lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
             print("finish lora b")
 
             # Scale LoRA output
