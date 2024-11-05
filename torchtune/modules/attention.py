@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Tuple
 
 import torch
 from torch import nn, Tensor
@@ -124,9 +124,63 @@ class CausalSelfAttention(nn.Module):
 
         self.bsz = bsz
 
+    def reshape_for_broadcast(self, freqs_cis: torch.Tensor, x: torch.Tensor):
+        """
+        Reshape frequency tensor for broadcasting it with another tensor.
+
+        This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
+        for the purpose of broadcasting the frequency tensor during element-wise operations.
+
+        Args:
+            freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
+            x (torch.Tensor): Target tensor for broadcasting compatibility.
+
+        Returns:
+            torch.Tensor: Reshaped frequency tensor.
+        """
+        ndim = x.ndim
+        assert 0 <= 1 < ndim
+        # print(f"freqs_cis shape is {freqs_cis.shape}, x shape is {x.shape}")
+        # assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+        freqs_cis = freqs_cis[:x.shape[1], :]
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
+
+
+    def apply_rotary_emb(
+        self,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        freqs_cis: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply rotary embeddings to input tensors using the given frequency tensor.
+
+        This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
+        frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
+        is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
+        returned as real tensors.
+
+        Args:
+            xq (torch.Tensor): Query tensor to apply rotary embeddings.
+            xk (torch.Tensor): Key tensor to apply rotary embeddings.
+            freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+        """
+        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+        xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+        freqs_cis = self.reshape_for_broadcast(freqs_cis, xq_).to(xq_.device)
+        xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+        xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+        return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
     def forward(
         self,
         x: Tensor,
+        freqs_cis: Tensor,
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
@@ -182,7 +236,7 @@ class CausalSelfAttention(nn.Module):
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
-        print(f"finish proj qkv, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}")
+        print(f"finish proj qkv, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}, types are {type(q), type(k), type(v)}")
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
 
@@ -207,8 +261,9 @@ class CausalSelfAttention(nn.Module):
         v = v.reshape(bsz, seq_len, -1, self.head_dim)
 
         # Apply positional embeddings
-        q = self.pos_embeddings(q, input_pos=input_pos)
-        k = self.pos_embeddings(k, input_pos=input_pos)
+        q, k = self.apply_rotary_emb(q, k, freqs_cis)
+        # q = self.pos_embeddings(q, input_pos=input_pos)
+        # k = self.pos_embeddings(k, input_pos=input_pos)
 
         # [b, n_h, s, h_d]
         q = q.transpose(1, 2)
@@ -236,5 +291,7 @@ class CausalSelfAttention(nn.Module):
         )
 
         # reshape the output to be the same shape as the input
+        print(f"output shape from attention is {output.shape}")
         output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+        print(f"output shape after transpose is {output.shape}")
         return self.output_proj(output)

@@ -631,7 +631,7 @@ def async_lora_llama3(
     # Quantization args
     quantize_base: bool = False,
     bsz: int=1,
-) -> LoraTransformerDecoder:
+) -> TransformerDecoder:
     """
     Return a version of Llama3 (an instance of :func:`~torchtune.modules.TransformerDecoder`)
     with LoRA applied based on the passed in configuration.

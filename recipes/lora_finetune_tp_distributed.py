@@ -208,7 +208,7 @@ class LoRALinearColColParallel(ParallelStyle):
         *,
         input_layouts: Optional[Placement] = None,
         output_layouts: Optional[Placement] = None,
-        use_local_output: bool = True,
+        use_local_output: bool = False,
     ):
         super().__init__()
         self.input_layouts = (input_layouts or Replicate(),)
@@ -250,13 +250,18 @@ class LoRALinearColColParallel(ParallelStyle):
         # for name, param in module.named_parameters():
         if hasattr(module, 'weight') and module.weight is not None:
             # print(module)
-            dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)]))
+            if not isinstance(module.weight, DTensor):
+                dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)]))
+            else:
+                dist_param = nn.Parameter(module.weight.redistribute(device_mesh, [Shard(0)]))
             module.register_parameter("weight", dist_param)
 
 
     @staticmethod
     def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
         # outputs is a shard on last dimension DTensor, i.e. Shard(-1)
+        if not isinstance(outputs, DTensor):
+            return outputs
         if outputs.placements != output_layouts:
             outputs = outputs.redistribute(placements=output_layouts, async_op=True)
         # back to local tensor
@@ -315,7 +320,7 @@ class LoRALinearRowColParallel(ParallelStyle):
         *,
         input_layouts: Optional[Placement] = None,
         output_layouts: Optional[Placement] = None,
-        use_local_output: bool = True,
+        use_local_output: bool = False,
     ):
         super().__init__()
         self.input_layouts = (input_layouts or Shard(-1),)
@@ -342,13 +347,13 @@ class LoRALinearRowColParallel(ParallelStyle):
         # Rowwise shard weight to Shard(1), bias to Replicate(), weight be Shard(1)
         # means Rowwise as nn.Linear is input * weight^T + bias, where
         # weight would become Shard(0)
-        if isinstance(module, nn.Dropout) or isinstance(module, nn.ModuleList):
-            return
-        else:
-            module.register_parameter(
-                "weight",
-                nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(1)])),
-            )
+        if hasattr(module, 'weight') and module.weight is not None:
+            # print(module)
+            if not isinstance(module.weight, DTensor):
+                dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(1)]))
+            else:
+                dist_param = nn.Parameter(module.weight.redistribute(device_mesh, [Shard(1)]))
+            module.register_parameter("weight", dist_param)
 
     @staticmethod
     def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
@@ -625,7 +630,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         log.info(f"device mesh size 0 is {self.device_mesh.size(0)}")
 
         log.info(f"Model instantiation took {time.perf_counter() - init_start:.2f} secs")
-
+        # log.info(f"base model keys are {base_model_state_dict.keys()}")
         validate_state_dict_for_lora_async(
             lora_attn_modules=cfg_model.lora_attn_modules,
             apply_lora_to_mlp=cfg_model.apply_lora_to_mlp,
@@ -687,13 +692,13 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             layer_prefix = f"layers.{idx}"
             
             # Add layer-specific parallelization strategies
-            full_tp_plan[f"{layer_prefix}.sa_norm"] = SequenceParallel(sequence_dim=1)
+            full_tp_plan[f"{layer_prefix}.sa_norm"] = SequenceParallel(sequence_dim=1, use_local_output=False)
             full_tp_plan[f"{layer_prefix}.attn.q_proj"] = LoRALinearColColParallel()
             # Include other attention projections if needed
             full_tp_plan[f"{layer_prefix}.attn.k_proj"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.attn.v_proj"] = LoRALinearColColParallel()
-            full_tp_plan[f"{layer_prefix}.attn.output_proj"] = LoRALinearColColParallel()
-            full_tp_plan[f"{layer_prefix}.mlp_norm"] = SequenceParallel(sequence_dim=1)
+            full_tp_plan[f"{layer_prefix}.attn.output_proj"] = LoRALinearRowColParallel()
+            full_tp_plan[f"{layer_prefix}.mlp_norm"] = SequenceParallel(sequence_dim=1, use_local_output=False)
             full_tp_plan[f"{layer_prefix}.mlp.w1"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.mlp.w2"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.mlp.w3"] = LoRALinearColColParallel()
@@ -705,7 +710,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_b.{idx}"] = LoRALinearColColParallel()
                 full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_a.{idx}"] = LoRALinearColColParallel()
                 full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+                full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_a.{idx}"] = LoRALinearRowColParallel()
                 full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_b.{idx}"] = LoRALinearColColParallel()
                 full_tp_plan[f"{layer_prefix}.mlp.w1.lora_a.{idx}"] = LoRALinearColColParallel()
                 full_tp_plan[f"{layer_prefix}.mlp.w1.lora_b.{idx}"] = LoRALinearColColParallel()
@@ -718,6 +723,13 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         log.info("Start parallelizing layers")
         # print(f"{model}")
         # Apply parallelization using the `parallelize_module` function
+        # for _, transformer_block in enumerate(model.layers):
+        #     # Adjust attention module to use the local number of heads
+        #     attn_layer = transformer_block.attn
+        #     attn_layer.num_heads = attn_layer.num_heads // self.device_mesh.size()
+        #     attn_layer.num_kv_heads = attn_layer.num_kv_heads // self.device_mesh.size()
+        model.freqs_cis = DTensor.from_local(model.freqs_cis, self.device_mesh, [Replicate()])
+
         model = parallelize_module(
             module=model,
             device_mesh=self.device_mesh,

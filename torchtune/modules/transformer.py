@@ -41,6 +41,7 @@ class TransformerDecoderLayer(nn.Module):
     def forward(
         self,
         x: Tensor,
+        freqs_cis: Tensor,
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
@@ -74,7 +75,7 @@ class TransformerDecoderLayer(nn.Module):
         print(f"x shape before norm is {x.shape}")
         norm_x = self.sa_norm(x)
         print(f"start attention input shape is {norm_x.shape}")
-        attn_out = self.attn(norm_x, mask=mask, input_pos=input_pos)
+        attn_out = self.attn(norm_x, freqs_cis, mask=mask, input_pos=input_pos)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
@@ -104,6 +105,27 @@ def _get_clones(module: nn.Module, n: int) -> nn.ModuleList:
     # FIXME: copy.deepcopy() is not defined on nn.module
     return nn.ModuleList([copy.deepcopy(module) for i in range(n)])
 
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    """
+    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
+
+    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
+    and the end index 'end'. The 'theta' parameter scales the frequencies.
+    The returned tensor contains complex values in complex64 data type.
+
+    Args:
+        dim (int): Dimension of the frequency tensor.
+        end (int): End index for precomputing frequencies.
+        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+
+    Returns:
+        torch.Tensor: Precomputed frequency tensor with complex exponentials.
+    """
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device)  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
 
 class TransformerDecoder(nn.Module):
     """
@@ -153,6 +175,14 @@ class TransformerDecoder(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.causal_mask = None
+
+        self.freqs_cis = precompute_freqs_cis(
+            self.head_dim,
+            # Need to compute until at least the max token limit for generation
+            # (use 2x max sequence length to be safe)
+            self.max_seq_len * 2,
+        )
+
 
     def setup_caches(self, batch_size: int, dtype: torch.dtype) -> None:
         """Setup key value caches for attention calculation.
@@ -256,7 +286,7 @@ class TransformerDecoder(nn.Module):
         for i, layer in enumerate(self.layers):
             # shape: [b, s, d]
             print(f"layer {i} input shape is {h.shape}")
-            h = layer(h, mask=mask, input_pos=input_pos)
+            h = layer(h, freqs_cis = self.freqs_cis, mask=mask, input_pos=input_pos)
 
         # shape: [b, s, d]
         h = self.norm(h)
