@@ -222,7 +222,7 @@ class CausalSelfAttention(nn.Module):
         """
         # input has shape [b, s, d]
         bsz, seq_len, _ = x.shape
-        print(f"input shape is {x.shape}")
+        # print(f"input shape is {x.shape}")
 
         if seq_len > self.max_seq_len:
             raise ValueError(
@@ -236,7 +236,7 @@ class CausalSelfAttention(nn.Module):
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
-        print(f"finish proj qkv, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}, types are {type(q), type(k), type(v)}")
+        # print(f"finish proj qkv, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}, types are {type(q), type(k), type(v)}")
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
 
@@ -291,7 +291,7 @@ class CausalSelfAttention(nn.Module):
         )
 
         # reshape the output to be the same shape as the input
-        print(f"output shape from attention is {output.shape}")
+        # print(f"output shape from attention is {output.shape}")
         output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
-        print(f"output shape after transpose is {output.shape}")
+        # print(f"output shape after transpose is {output.shape}")
         return self.output_proj(output)

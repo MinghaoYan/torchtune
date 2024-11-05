@@ -1057,8 +1057,10 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
                     # Zero out gradients of LoRA parameters
                     for module in lora_modules:
-                        module.lora_a.weight.grad = None
-                        module.lora_b.weight.grad = None
+                        for idx, layer in enumerate(module.lora_a):
+                            layer.weight.grad = None  
+                        for idx, layer in enumerate(module.lora_b):
+                            layer.weight.grad = None 
 
                     # Compute gradients w.r.t. LoRA parameters
                     log.info("start backward pass")

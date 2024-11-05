@@ -537,10 +537,10 @@ class LoRALinearColCol(nn.Module, AdapterModule):
 
             # LoRA A1 (column-partitioned), apply dropout and projection
             input_i = self.dropout(input_i)
-            print(f"input shape is {input_i.shape}, lora_a[{i}] weight shape is {self.lora_a[i].weight.shape}")
+            # print(f"input shape is {input_i.shape}, lora_a[{i}] weight shape is {self.lora_a[i].weight.shape}")
             # print("get input")
             lora_a_out_i = self.lora_a[i](input_i)
-            print(f"finish lora a with shape {lora_a_out_i.shape}, type is {type(lora_a_out_i)}")
+            # print(f"finish lora a with shape {lora_a_out_i.shape}, type is {type(lora_a_out_i)}")
             
             # # Convert DTensor to local tensor before all_gather
             # lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
@@ -558,7 +558,7 @@ class LoRALinearColCol(nn.Module, AdapterModule):
                 device_mesh=self.device_mesh,
                 placements=[Replicate()]  # Adjust this if your shard is on a different dimension
             )
-            print(f"finish lora a gather with shape {lora_a_out_i.shape}")
+            # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
 
 
             # # Convert the output of lora_a to DTensor for distributed operation
@@ -567,9 +567,9 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # )
 
             # LoRA B1 (column-partitioned) for QKV projection
-            print(f"lora a out shape is {lora_a_out_i_dtensor.shape}")
+            # print(f"lora a out shape is {lora_a_out_i_dtensor.shape}")
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-            print(f"finish lora b out shape is {lora_b_out_i.shape}")
+            # print(f"finish lora b out shape is {lora_b_out_i.shape}")
 
             # lora_b_out_i_dtensor = distribute_tensor(
             #     lora_b_out_i, device_mesh=self.device_mesh, placements=[Shard(1)]
@@ -581,12 +581,12 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
             # Combine with base model output
-            print(f"out shape is {out.shape}, type is {type(out)}")
+            # print(f"out shape is {out.shape}, type is {type(out)}")
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-            print(f"base_out_i shape is {base_out_i.shape}, type is {type(base_out_i)}")
+            # print(f"base_out_i shape is {base_out_i.shape}, type is {type(base_out_i)}")
             # base_out_local_i = base_out_i.to_local()
             # print(f"base_out_local_i shape is {base_out_local_i.shape}, type is {type(base_out_local_i)}")
-            print(f"scaled_lora_out_i shape is {scaled_lora_out_i.shape}, type is {type(scaled_lora_out_i)}")
+            # print(f"scaled_lora_out_i shape is {scaled_lora_out_i.shape}, type is {type(scaled_lora_out_i)}")
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
         concatenated_lora = torch.cat(lora_outs, dim=0)
@@ -725,7 +725,7 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
     def forward(self, x: Tensor, activated: int = 0):
         # Base model computation with row-partitioned base weight (W2 equivalent)
-        print(f"input dimension is {x.shape}, type is {type(x)}, weight dimension is {self.weight.shape}, type is {type(self.weight)}")
+        # print(f"input dimension is {x.shape}, type is {type(x)}, weight dimension is {self.weight.shape}, type is {type(self.weight)}")
         if self._quantize_base:
             out = linear_nf4(input=x, weight=self.weight)
         else:
@@ -745,20 +745,20 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
             # LoRA A2 (row-partitioned), apply dropout and projection
             input_i = self.dropout(input_i)
-            print(f"input dimension is {input_i.shape}, local dim is {input_i.to_local().shape}, placement is {input_i.placements}")
+            # print(f"input dimension is {input_i.shape}, local dim is {input_i.to_local().shape}, placement is {input_i.placements}")
             lora_a_out_i = self.lora_a[i](input_i)
-            print(f"lora_a_out_i dimension is {lora_a_out_i.shape}, local dim is {lora_a_out_i.to_local().shape}, placement is {lora_a_out_i.placements}")
+            # print(f"lora_a_out_i dimension is {lora_a_out_i.shape}, local dim is {lora_a_out_i.to_local().shape}, placement is {lora_a_out_i.placements}")
             # All-reduce after A2 to accumulate across ranks
             # dist.all_reduce(lora_a_out_i, op=dist.ReduceOp.SUM)
             lora_a_out_i_dtensor = lora_a_out_i.redistribute(
                 device_mesh=self.device_mesh,
                 placements=[Replicate()]  # Adjust this if your shard is on a different dimension
             )
-            print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
+            # print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
 
             # LoRA B2 (column-partitioned) for output projection
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-            print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
+            # print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
