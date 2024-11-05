@@ -77,6 +77,8 @@ class TransformerDecoderLayer(nn.Module):
         print(f"start attention input shape is {norm_x.shape}")
         attn_out = self.attn(norm_x, freqs_cis, mask=mask, input_pos=input_pos)
 
+        print(f"attn_out dimension is {attn_out.shape}, local dim is {attn_out.to_local().shape}, placement is {attn_out.placements}")
+        print(f"x dimension is {x.shape}, local dim is {x.to_local().shape}, placement is {x.placements}")
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = attn_out + x
         print(f"start mlp")
@@ -262,7 +264,7 @@ class TransformerDecoder(nn.Module):
 
         # shape: [b, s, d]
         h = self.tok_embeddings(tokens)
-        print(f"finish embedding layer with shape {h.shape}")
+        print(f"finish embedding layer with shape {h.shape}, local dim is {h.to_local().shape}, placement is {h.placements}")
 
         # if not isinstance(h, DTensor):
         #     h = DTensor.from_local(h, device_mesh=self.device_mesh, placements=[Shard(1)])
@@ -285,7 +287,7 @@ class TransformerDecoder(nn.Module):
 
         for i, layer in enumerate(self.layers):
             # shape: [b, s, d]
-            print(f"layer {i} input shape is {h.shape}")
+            print(f"layer {i} input shape is {h.shape}, local dim is {h.to_local().shape}, placement is {h.placements}")
             h = layer(h, freqs_cis = self.freqs_cis, mask=mask, input_pos=input_pos)
 
         # shape: [b, s, d]

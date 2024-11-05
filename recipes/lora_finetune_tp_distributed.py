@@ -742,8 +742,9 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Replicate(),  # Ensure weights are replicated for embedding
+                use_local_output=False,
             ),
-            "norm": SequenceParallel(),
+            "norm": SequenceParallel(use_local_output=False),
             "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 use_local_output=False,

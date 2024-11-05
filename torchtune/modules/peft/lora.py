@@ -758,7 +758,7 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
             # LoRA B2 (column-partitioned) for output projection
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-
+            print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
