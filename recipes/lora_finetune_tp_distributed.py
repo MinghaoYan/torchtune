@@ -248,13 +248,41 @@ class LoRALinearColColParallel(ParallelStyle):
         # else:
         #     module.register_parameter("weight", nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)])))
         # for name, param in module.named_parameters():
-        if hasattr(module, 'weight') and module.weight is not None:
-            # print(module)
-            if not isinstance(module.weight, DTensor):
-                dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)]))
-            else:
-                dist_param = nn.Parameter(module.weight.redistribute(device_mesh, [Shard(0)]))
-            module.register_parameter("weight", dist_param)
+        # if hasattr(module, 'weight') and module.weight is not None:
+        #     # print(module)
+        #     if not isinstance(module.weight, DTensor):
+        #         dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)]))
+        #     else:
+        #         dist_param = nn.Parameter(module.weight.redistribute(device_mesh, [Shard(0)]))
+        #     module.register_parameter("weight", dist_param)
+        
+        # for name, param in module.named_parameters():
+        #     print(f"col param name is {name}")
+        #     dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+        #     module.register_parameter(name, dist_param)
+        
+        for subname, submodule in module.named_children():
+            # print(f"submodule name is {subname}, submodule is {submodule}")
+            if isinstance(submodule, nn.Dropout):
+                continue
+            if "lora_a" in subname or "lora_b" in subname:
+                # Directly iterate through submodule if it's a ModuleList (e.g., `lora_a` or `lora_b`)
+                for _, lin_module in enumerate(submodule):
+                    # print(f"col module index is {idx}, module name is {lin_module}")
+                    for p_name, param in lin_module.named_parameters():
+                        # print(f"p_name is {p_name} in module {lin_module}")
+                        lin_module.register_parameter("weight", nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])))
+        for subname, submodule in module.named_modules():
+            if isinstance(submodule, nn.Dropout) or isinstance(submodule, nn.ModuleList):
+                continue
+            if subname == "":
+                if isinstance(module.weight, DTensor):
+                    continue
+                module.register_parameter("weight", nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(0)])))
+        
+        # exit(0)
+
+
 
 
     @staticmethod
@@ -347,13 +375,48 @@ class LoRALinearRowColParallel(ParallelStyle):
         # Rowwise shard weight to Shard(1), bias to Replicate(), weight be Shard(1)
         # means Rowwise as nn.Linear is input * weight^T + bias, where
         # weight would become Shard(0)
-        if hasattr(module, 'weight') and module.weight is not None:
-            # print(module)
-            if not isinstance(module.weight, DTensor):
-                dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(1)]))
-            else:
-                dist_param = nn.Parameter(module.weight.redistribute(device_mesh, [Shard(1)]))
-            module.register_parameter("weight", dist_param)
+        # if hasattr(module, 'weight') and module.weight is not None:
+        #     # print(module)
+        #     if not isinstance(module.weight, DTensor):
+        #         dist_param = nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(1)]))
+        #     else:
+        #         dist_param = nn.Parameter(module.weight.redistribute(device_mesh, [Shard(1)]))
+        #     module.register_parameter("weight", dist_param)
+        # for name, param in module.named_parameters():
+        #     if "lora_b" in name:
+        #         print(f"row param name is {name}")
+        #         dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+        #     else:
+        #         dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(1)]))
+        #     module.register_parameter(name, dist_param)
+
+        for subname, submodule in module.named_children():
+            # print(f"submodule name is {subname}, submodule is {submodule}")
+            if isinstance(submodule, nn.Dropout):
+                continue
+            if "lora_a" in subname:
+                # Directly iterate through submodule if it's a ModuleList (e.g., `lora_a` or `lora_b`)
+                for _, lin_module in enumerate(submodule):
+                    # print(f"col module index is {idx}, module name is {lin_module}")
+                    for p_name, param in lin_module.named_parameters():
+                        # print(f"p_name is {p_name} in module {lin_module}")
+                        lin_module.register_parameter("weight", nn.Parameter(distribute_tensor(param, device_mesh, [Shard(1)])))
+            elif "lora_b" in subname:
+                # Directly iterate through submodule if it's a ModuleList (e.g., `lora_a` or `lora_b`)
+                for _, lin_module in enumerate(submodule):
+                    # print(f"col module index is {idx}, module name is {lin_module}")
+                    for p_name, param in lin_module.named_parameters():
+                        # print(f"p_name is {p_name} in module {lin_module}")
+                        lin_module.register_parameter("weight", nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])))
+
+        for subname, submodule in module.named_modules():
+            if isinstance(submodule, nn.Dropout) or isinstance(submodule, nn.ModuleList):
+                continue
+            if subname == "":
+                if isinstance(module.weight, DTensor):
+                    continue
+                module.register_parameter("weight", nn.Parameter(distribute_tensor(module.weight, device_mesh, [Shard(1)])))
+
 
     @staticmethod
     def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
@@ -703,21 +766,21 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             full_tp_plan[f"{layer_prefix}.mlp.w2"] = LoRALinearColColParallel()
             full_tp_plan[f"{layer_prefix}.mlp.w3"] = LoRALinearColColParallel()
         
-            for idx in range(self.num_adapters):
-                full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_a.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_a.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_a.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_a.{idx}"] = LoRALinearRowColParallel()
-                full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.mlp.w1.lora_a.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.mlp.w1.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.mlp.w2.lora_a.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.mlp.w2.lora_b.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.mlp.w3.lora_a.{idx}"] = LoRALinearColColParallel()
-                full_tp_plan[f"{layer_prefix}.mlp.w3.lora_b.{idx}"] = LoRALinearColColParallel()
+            # for idx in range(self.num_adapters):
+            #     full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.q_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.k_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_a.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.v_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_a.{idx}"] = LoRALinearRowColParallel()
+            #     full_tp_plan[f"{layer_prefix}.attn.output_proj.lora_b.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w1.lora_a.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w1.lora_b.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w2.lora_a.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w2.lora_b.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w3.lora_a.{idx}"] = LoRALinearColColParallel()
+            #     full_tp_plan[f"{layer_prefix}.mlp.w3.lora_b.{idx}"] = LoRALinearColColParallel()
 
 
         log.info("Start parallelizing layers")
@@ -736,6 +799,9 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             parallelize_plan=full_tp_plan,
         )
 
+        # for name, param in model.named_parameters():
+        #     print(f"Param {name} has type {type(param)} and placement {param.placements}")
+        # exit(0)
         for i, lora_a in enumerate(model.layers[0].attn.q_proj.lora_a):
             print(f"[Rank {self.device_mesh.get_rank()}] LoRA A1[{i}] weight shape after parallelize_module: {lora_a.weight.shape}")
 
