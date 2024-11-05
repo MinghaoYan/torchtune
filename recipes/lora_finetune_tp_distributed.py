@@ -995,6 +995,8 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     # Calculate padding to make sequence length divisible by the number of ranks
                     pad_len = self.device_mesh.size(0) - (max_seq_len % self.device_mesh.size(0))
                     tokens_repeated = F.pad(tokens_repeated, (0, pad_len))  # pad on sequence dimension
+                    labels_repeated = F.pad(labels_repeated, (0, pad_len))
+
                 print(f"tokens_repeated shape is {tokens_repeated.shape}")
                 # Ensure tokens_repeated is fully replicated before embedding layer
                 tokens_repeated = DTensor.from_local(
@@ -1029,8 +1031,17 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 bsz = tokens.size(0)
 
                 # Initialize accumulators for gradients
-                accum_lora_a_grads = {module: torch.zeros_like(module.lora_a.weight) for module in lora_modules}
-                accum_lora_b_grads = {module: torch.zeros_like(module.lora_b.weight) for module in lora_modules}
+                print(f"lora_modules are {lora_modules}")
+                # Creating gradient accumulators for each Linear layer in lora_a and lora_b
+                accum_lora_a_grads = {}
+                accum_lora_b_grads = {}
+
+                for module in lora_modules:  # lora_modules is a list of LoRALinearRowCol modules
+                    # Create a list of gradient tensors for each Linear layer in lora_a
+                    accum_lora_a_grads[module] = [torch.zeros_like(layer.weight) for layer in module.lora_a]
+                    # Create a list of gradient tensors for each Linear layer in lora_b
+                    accum_lora_b_grads[module] = [torch.zeros_like(layer.weight) for layer in module.lora_b]
+
 
                 # Perform separate backward passes for each adapter
                 for i in range(self.num_adapters):
@@ -1055,16 +1066,30 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     log.info("finish backward pass")
 
                     # Accumulate gradients
+                    # for module in lora_modules:
+                    #     if module.lora_a.weight.grad is not None:
+                    #         accum_lora_a_grads[module] += module.lora_a.weight.grad.clone()
+                    #     if module.lora_b.weight.grad is not None:
+                    #         accum_lora_b_grads[module] += module.lora_b.weight.grad.clone()
                     for module in lora_modules:
-                        if module.lora_a.weight.grad is not None:
-                            accum_lora_a_grads[module] += module.lora_a.weight.grad.clone()
-                        if module.lora_b.weight.grad is not None:
-                            accum_lora_b_grads[module] += module.lora_b.weight.grad.clone()
+                        for idx, layer in enumerate(module.lora_a):
+                            accum_lora_a_grads[module][idx] += layer.weight.grad.clone()
+                        for idx, layer in enumerate(module.lora_b):
+                            accum_lora_b_grads[module][idx] += layer.weight.grad.clone()
+
+
+                # After processing all adapters, assign accumulated gradients
+                # for module in lora_modules:
+                #     module.lora_a.weight.grad = accum_lora_a_grads[module]
+                #     module.lora_b.weight.grad = accum_lora_b_grads[module]
 
                 # After processing all adapters, assign accumulated gradients
                 for module in lora_modules:
-                    module.lora_a.weight.grad = accum_lora_a_grads[module]
-                    module.lora_b.weight.grad = accum_lora_b_grads[module]
+                    for idx, layer in enumerate(module.lora_a):
+                        layer.weight.grad = accum_lora_a_grads[module][idx]  # Assign accumulated gradient to each lora_a layer
+                    for idx, layer in enumerate(module.lora_b):
+                        layer.weight.grad = accum_lora_b_grads[module][idx]  # Assign accumulated gradient to each lora_b layer
+
 
                 # Clear intermediate variables to free memory
                 del logits, labels_shifted, tokens_repeated, labels_repeated
