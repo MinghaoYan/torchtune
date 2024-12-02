@@ -578,12 +578,21 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         )
         self._tokenizer = config.instantiate(cfg.tokenizer)
 
-        self._optimizer = self._setup_optimizer(
-            cfg_optimizer=cfg.optimizer,
-            opt_state_dict=checkpoint_dict[utils.OPT_KEY]
-            if self._resume_from_checkpoint
-            else None,
-        )
+        # self._optimizer = self._setup_optimizer(
+        #     cfg_optimizer=cfg.optimizer,
+        #     opt_state_dict=checkpoint_dict[utils.OPT_KEY]
+        #     if self._resume_from_checkpoint
+        #     else None,
+        # )
+
+        self._optimizers = []
+        for _ in self.num_adapters:
+            self._optimizers.append(self._setup_optimizer(
+                cfg_optimizer=cfg.optimizer,
+                opt_state_dict=checkpoint_dict[utils.OPT_KEY]
+                if self._resume_from_checkpoint
+                else None,
+            ))
 
         self._loss_fn = config.instantiate(cfg.loss)
 
@@ -623,11 +632,19 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         # Learning rate scheduler can only be set up after number of steps
         # has been computed
-        self._lr_scheduler = self._setup_lr_scheduler(
-            cfg_lr_scheduler=cfg.lr_scheduler,
-            num_training_steps=self.total_epochs * self._steps_per_epoch,
-            last_epoch=self.global_step - 1,
-        )
+        # self._lr_scheduler = self._setup_lr_scheduler(
+        #     cfg_lr_scheduler=cfg.lr_scheduler,
+        #     num_training_steps=self.total_epochs * self._steps_per_epoch,
+        #     last_epoch=self.global_step - 1,
+        # )
+
+        self._schedulers = []
+        for _ in self.num_adapters:
+            self._schedulers.append(self._setup_lr_scheduler(
+                cfg_lr_scheduler=cfg.lr_scheduler,
+                num_training_steps=self.total_epochs * self._steps_per_epoch,
+                last_epoch=self.global_step - 1,
+            ))
 
         # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
         # if cfg is missing profiler key or if `cfg.profiler.enabled = False`
@@ -940,7 +957,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         _, rank = utils.get_world_size_and_rank()
 
         # Zero out the gradients before starting training
-        self._optimizer.zero_grad(set_to_none=True)
+        # self._optimizer.zero_grad(set_to_none=True)
 
         # Initialize tokens count and running loss (for grad accumulation)
         t0 = time.perf_counter()
@@ -952,6 +969,22 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         for module in self._model.modules():
             if hasattr(module, 'lora_a') and hasattr(module, 'lora_b'):
                 lora_modules.append(module)
+        
+        # Prepare separate optimizers and schedulers for each adapter
+        # self._optimizers = {}
+        # self._schedulers = {}
+
+        for adapter_idx in range(self.num_adapters):
+            # Collect parameters for this adapter across all LoRA modules
+            adapter_params = []
+            for module in lora_modules:
+                # module.lora_a and module.lora_b are ModuleLists
+                adapter_params.append(module.lora_a[adapter_idx].weight)
+                adapter_params.append(module.lora_b[adapter_idx].weight)
+            optimizer = torch.optim.AdamW(adapter_params, lr=1e-4)  # Customize learning rate as needed
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.95)
+            self._optimizers[adapter_idx] = optimizer
+            self._schedulers[adapter_idx] = scheduler
 
         self._profiler.start()
 
@@ -1049,11 +1082,11 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     lora_labels = labels_shifted[i * bsz:(i + 1) * bsz, ...]
 
                     # Compute loss
-                    log.info("start computing loss")
+                    # log.info("start computing loss")
                     loss = self._loss_fn(lora_output, lora_labels)
                     loss = loss / self._gradient_accumulation_steps
                     running_loss += loss.item()
-                    log.info("finish computing loss")
+                    # log.info("finish computing loss")
 
                     # Zero out gradients of LoRA parameters
                     for module in lora_modules:
@@ -1063,27 +1096,15 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                             layer.weight.grad = None 
 
                     # Compute gradients w.r.t. LoRA parameters
-                    log.info("start backward pass")
+                    # log.info("start backward pass")
                     loss.backward(retain_graph=True)
-                    log.info("finish backward pass")
+                    # log.info("finish backward pass")
 
-                    # Accumulate gradients
-                    # for module in lora_modules:
-                    #     if module.lora_a.weight.grad is not None:
-                    #         accum_lora_a_grads[module] += module.lora_a.weight.grad.clone()
-                    #     if module.lora_b.weight.grad is not None:
-                    #         accum_lora_b_grads[module] += module.lora_b.weight.grad.clone()
                     for module in lora_modules:
                         for idx, layer in enumerate(module.lora_a):
                             accum_lora_a_grads[module][idx] += layer.weight.grad.clone()
                         for idx, layer in enumerate(module.lora_b):
                             accum_lora_b_grads[module][idx] += layer.weight.grad.clone()
-
-
-                # After processing all adapters, assign accumulated gradients
-                # for module in lora_modules:
-                #     module.lora_a.weight.grad = accum_lora_a_grads[module]
-                #     module.lora_b.weight.grad = accum_lora_b_grads[module]
 
                 # After processing all adapters, assign accumulated gradients
                 for module in lora_modules:
@@ -1092,6 +1113,14 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                     for idx, layer in enumerate(module.lora_b):
                         layer.weight.grad = accum_lora_b_grads[module][idx]  # Assign accumulated gradient to each lora_b layer
 
+                # Perform optimizer steps for each adapter
+                for adapter_idx in range(self.num_adapters):
+                    optimizer = self._optimizers[adapter_idx]
+                    scheduler = self._schedulers[adapter_idx]
+                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    scheduler.step()
 
                 # Clear intermediate variables to free memory
                 del logits, labels_shifted, tokens_repeated, labels_repeated

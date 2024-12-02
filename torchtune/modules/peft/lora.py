@@ -767,5 +767,42 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
             base_out_i = base_out_i.to(scaled_lora_out_i.device)
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
+        # Define a function to handle each loop iteration
+        # def lora_iteration(i, x, bsz, self):
+        #     input_i = x[i * bsz : (i + 1) * bsz, ...]
+            
+        #     # Apply dropout and LoRA A2 projection
+        #     input_i = self.dropout(input_i)
+        #     lora_a_out_i = self.lora_a[i](input_i)
+            
+        #     # Redistribute (all-reduce)
+        #     lora_a_out_i_dtensor = lora_a_out_i.redistribute(
+        #         device_mesh=self.device_mesh,
+        #         placements=[Replicate()]
+        #     )
+            
+        #     # LoRA B2 projection
+        #     lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
+            
+        #     # Scale output
+        #     scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
+            
+        #     # Combine with base model output
+        #     base_out_i = self.out[i * bsz : (i + 1) * bsz, ...]
+        #     base_out_i = base_out_i.to(scaled_lora_out_i.device)
+            
+        #     return base_out_i + scaled_lora_out_i
+
+        # # Main loop using torch.jit.fork
+        # lora_outs = []
+        # futures = []
+
+        # for i in range(len(self.rank)):
+        #     future = torch.jit.fork(lora_iteration, i, x, bsz, self)
+        #     futures.append(future)
+
+        # # Wait for all tasks to complete and collect results
+        # lora_outs = [torch.jit.wait(fut) for fut in futures]
+
         concatenated_lora = torch.cat(lora_outs, dim=0)
         return concatenated_lora
