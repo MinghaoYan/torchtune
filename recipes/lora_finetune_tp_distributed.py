@@ -586,7 +586,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         # )
 
         self._optimizers = []
-        for _ in self.num_adapters:
+        for _ in range(self.num_adapters):
             self._optimizers.append(self._setup_optimizer(
                 cfg_optimizer=cfg.optimizer,
                 opt_state_dict=checkpoint_dict[utils.OPT_KEY]
@@ -639,11 +639,12 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         # )
 
         self._schedulers = []
-        for _ in self.num_adapters:
+        for idx in range(self.num_adapters):
             self._schedulers.append(self._setup_lr_scheduler(
                 cfg_lr_scheduler=cfg.lr_scheduler,
                 num_training_steps=self.total_epochs * self._steps_per_epoch,
                 last_epoch=self.global_step - 1,
+                idx=idx,
             ))
 
         # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
@@ -781,7 +782,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
             full_tp_plan[f"{layer_prefix}.attn.output_proj"] = LoRALinearRowColParallel()
             full_tp_plan[f"{layer_prefix}.mlp_norm"] = SequenceParallel(sequence_dim=1, use_local_output=False)
             full_tp_plan[f"{layer_prefix}.mlp.w1"] = LoRALinearColColParallel()
-            full_tp_plan[f"{layer_prefix}.mlp.w2"] = LoRALinearColColParallel()
+            full_tp_plan[f"{layer_prefix}.mlp.w2"] = LoRALinearRowColParallel()
             full_tp_plan[f"{layer_prefix}.mlp.w3"] = LoRALinearColColParallel()
         
             # for idx in range(self.num_adapters):
@@ -861,10 +862,11 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         cfg_lr_scheduler: DictConfig,
         num_training_steps: int,
         last_epoch: int,
+        idx: int,
     ) -> Optimizer:
         lr_scheduler = config.instantiate(
             cfg_lr_scheduler,
-            self._optimizer,
+            self._optimizers[idx],
             num_training_steps=num_training_steps,
             last_epoch=last_epoch,
         )

@@ -764,7 +764,7 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
             # Combine with base model output
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-            base_out_i = base_out_i.to(scaled_lora_out_i.device)
+            # base_out_i = base_out_i.to(scaled_lora_out_i.device)
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
         # Define a function to handle each loop iteration
