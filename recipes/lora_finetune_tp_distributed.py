@@ -29,6 +29,7 @@ from torchtune.modules.peft.peft_utils import (
     set_trainable_params,
     validate_state_dict_for_lora,
     validate_state_dict_for_lora_async,
+    get_adapter_params_per_adapter,
 )
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.utils import DummyProfiler, PROFILER_KEY
@@ -584,14 +585,26 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         #     if self._resume_from_checkpoint
         #     else None,
         # )
+            # Collect parameters for each adapter
+        # self.adapter_params = []
+        # for adapter_idx in range(self.num_adapters):
+        #     adapter_param = []
+        #     for module in self.lora_modules:
+        #         adapter_param.append(module.lora_a[adapter_idx].weight)
+        #         adapter_param.append(module.lora_b[adapter_idx].weight)
+        #     self.adapter_params.append(adapter_param)
+
+        # self.adapter_params = collect_adapter_params(self._model, self.num_adapters)
+
 
         self._optimizers = []
-        for _ in range(self.num_adapters):
+        for idx in range(self.num_adapters):
             self._optimizers.append(self._setup_optimizer(
                 cfg_optimizer=cfg.optimizer,
                 opt_state_dict=checkpoint_dict[utils.OPT_KEY]
                 if self._resume_from_checkpoint
                 else None,
+                adapter_params=list(self.adapter_params[idx].values())
             ))
 
         self._loss_fn = config.instantiate(cfg.loss)
@@ -742,7 +755,10 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         self._lora_alpha = cfg_model.lora_alpha
 
         # Set trainable parameters
-        self.adapter_params = get_adapter_params(model)
+        # self.adapter_params = get_adapter_params(model)
+
+        self.adapter_params = get_adapter_params_per_adapter(model, self.num_adapters)
+        # print(self.adapter_params)
 
         # Check if each parameter is a leaf
         for name, param in model.named_parameters():
@@ -843,14 +859,21 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
 
     def _setup_optimizer(
-        self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
+        self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None, adapter_params = None
     ) -> Optimizer:
         # Assuming `self.adapter_params` is a list of parameters
         # for idx, param in enumerate(self.adapter_params):
         #     if not isinstance(param, (torch.Tensor, nn.Parameter)):
         #         print(f"Non-tensor item found at index {idx}: {param} (type: {type(param)})")
 
-        optimizer = config.instantiate(cfg_optimizer, self._model.parameters())
+        # optimizer = config.instantiate(cfg_optimizer, self._model.parameters())
+        # Ensure all elements are torch.nn.Parameter
+        for idx, param in enumerate(adapter_params):
+            if not isinstance(param, torch.nn.Parameter):
+                print(f"Invalid parameter at index {idx}: {param} (type: {type(param)})")
+                # raise TypeError(f"Invalid parameter at index {idx}: {param} (type: {type(param)})")
+
+        optimizer = config.instantiate(cfg_optimizer, adapter_params)
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
         if self._is_rank_zero:
@@ -976,17 +999,17 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
         # self._optimizers = {}
         # self._schedulers = {}
 
-        for adapter_idx in range(self.num_adapters):
-            # Collect parameters for this adapter across all LoRA modules
-            adapter_params = []
-            for module in lora_modules:
-                # module.lora_a and module.lora_b are ModuleLists
-                adapter_params.append(module.lora_a[adapter_idx].weight)
-                adapter_params.append(module.lora_b[adapter_idx].weight)
-            optimizer = torch.optim.AdamW(adapter_params, lr=1e-4)  # Customize learning rate as needed
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.95)
-            self._optimizers[adapter_idx] = optimizer
-            self._schedulers[adapter_idx] = scheduler
+        # for adapter_idx in range(self.num_adapters):
+        #     # Collect parameters for this adapter across all LoRA modules
+        #     adapter_params = []
+        #     for module in lora_modules:
+        #         # module.lora_a and module.lora_b are ModuleLists
+        #         adapter_params.append(module.lora_a[adapter_idx].weight)
+        #         adapter_params.append(module.lora_b[adapter_idx].weight)
+        #     optimizer = torch.optim.AdamW(adapter_params, lr=1e-4)  # Customize learning rate as needed
+        #     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.95)
+        #     self._optimizers[adapter_idx] = optimizer
+        #     self._schedulers[adapter_idx] = scheduler
 
         self._profiler.start()
 
@@ -1066,7 +1089,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 bsz = tokens.size(0)
 
                 # Initialize accumulators for gradients
-                print(f"lora_modules are {lora_modules}")
+                # print(f"lora_modules are {lora_modules}")
                 # Creating gradient accumulators for each Linear layer in lora_a and lora_b
                 accum_lora_a_grads = {}
                 accum_lora_b_grads = {}
@@ -1119,7 +1142,9 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 for adapter_idx in range(self.num_adapters):
                     optimizer = self._optimizers[adapter_idx]
                     scheduler = self._schedulers[adapter_idx]
+                    # print(optimizer.param_groups[0]['params'])
                     torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
+                    # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
                     optimizer.step()
                     optimizer.zero_grad()
                     scheduler.step()
@@ -1131,12 +1156,12 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                 # Gradient accumulation and optimizer step
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
                     # Clip gradients if necessary
-                    torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
+                    # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
 
-                    # Optimizer step
-                    self._optimizer.step()
-                    self._optimizer.zero_grad(set_to_none=True)
-                    self._lr_scheduler.step()
+                    # # Optimizer step
+                    # self._optimizer.step()
+                    # self._optimizer.zero_grad(set_to_none=True)
+                    # self._lr_scheduler.step()
 
                     self.global_step += 1
 
@@ -1152,7 +1177,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
                         time_per_step = time.perf_counter() - t0
                         log_dict = {
                             "loss": running_loss,
-                            "lr": self._optimizer.param_groups[0]["lr"],
+                            "lr": self._optimizers[0].param_groups[0]["lr"],
                             "tokens_per_second_per_gpu": num_tokens / time_per_step,
                         }
                         if self._log_peak_memory_stats:

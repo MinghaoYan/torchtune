@@ -61,6 +61,39 @@ def get_adapter_params(model: nn.Module) -> Dict[str, nn.Parameter]:
     return adapter_params
 
 
+def get_adapter_params_per_adapter(model: nn.Module, num_adapters: int) -> List[Dict[str, nn.Parameter]]:
+    """
+    Collects adapter parameters for each adapter index.
+
+    Args:
+        model (nn.Module): The model containing adapters.
+        num_adapters (int): The number of adapters.
+
+    Returns:
+        List[Dict[str, nn.Parameter]]: A list where each element is a dictionary of parameters for an adapter.
+    """
+    adapter_params_list = [{} for _ in range(num_adapters)]
+    for module_name, module in model.named_modules():
+        if hasattr(module, "adapter_params") and callable(module.adapter_params):
+            # Collect the names of adapter parameters
+            current_adapter_param_names = module.adapter_params()
+            for n, p in module.named_parameters(recurse=True):
+                # Check if the parameter is an adapter parameter
+                if n in current_adapter_param_names:
+                    # Extract adapter index from the parameter name
+                    # Assuming parameter names are formatted as 'lora_a.{idx}.weight' or 'lora_b.{idx}.weight'
+                    parts = n.split('.')
+                    if len(parts) >= 2 and parts[0] in ('lora_a', 'lora_b'):
+                        try:
+                            adapter_idx = int(parts[1])
+                            if 0 <= adapter_idx < num_adapters:
+                                full_key = f"{module_name}.{n}" if module_name else n
+                                adapter_params_list[adapter_idx][full_key] = p
+                        except ValueError:
+                            pass  # Not an adapter parameter with an index
+    return adapter_params_list
+
+
 def set_trainable_params(model: nn.Module, adapter_params: Dict[str, Any]) -> None:
     """
     Set trainable parameters for an nn.Module based on a state dict of adapter parameters.

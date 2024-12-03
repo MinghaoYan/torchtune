@@ -97,15 +97,15 @@ class RMSNorm(nn.Module):
         world_size = torch.distributed.get_world_size()
         device_ids = list(range(world_size))
         device_mesh = DeviceMesh('cuda', device_ids)
-        print(f"x_norm before shape is {output.shape}, type is {type(output)}")
-        print(f"scale before shape is {self.scale.shape}, type is {type(self.scale)}")
+        # print(f"x_norm before shape is {output.shape}, type is {type(output)}")
+        # print(f"scale before shape is {self.scale.shape}, type is {type(self.scale)}")
         if not isinstance(self.scale, DTensor):
             self.scale = DTensor.from_local(self.scale, device_mesh, [Replicate()])   
         if not isinstance(output, DTensor):
             output = DTensor.from_local(output, device_mesh, [Replicate()])  
         # output = DTensor.redistribute(output, device_mesh=device_mesh, placements=[Shard(1)])
-        print(f"x_norm local shape is {output.to_local().shape}, placement is {output.placements}, type is {type(output)}")
-        print(f"scale locals shape is {self.scale.to_local().shape}, placement is {self.scale.placements}, type is {type(self.scale)}, scale dimension is {self.scale.numel()}")
+        # print(f"x_norm local shape is {output.to_local().shape}, placement is {output.placements}, type is {type(output)}")
+        # print(f"scale locals shape is {self.scale.to_local().shape}, placement is {self.scale.placements}, type is {type(self.scale)}, scale dimension is {self.scale.numel()}")
         # scaled_output = DTensor.from_local(, device_mesh, )
 
         return output * self.scale
