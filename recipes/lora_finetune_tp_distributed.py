@@ -1102,50 +1102,85 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
 
                 # Perform separate backward passes for each adapter
+                running_loss = []
+                previous_lora_output = None
                 for i in range(self.num_adapters):
+                    # Mask gradients for all LoRA layers, only activate the current adapter
+                    for module in lora_modules:
+                        for idx, layer in enumerate(module.lora_a):
+                            layer.weight.requires_grad = (idx == i)
+                        for idx, layer in enumerate(module.lora_b):
+                            layer.weight.requires_grad = (idx == i)
+
                     lora_output = logits[i * bsz:(i + 1) * bsz, ...]
                     lora_labels = labels_shifted[i * bsz:(i + 1) * bsz, ...]
+
+                    # Log the shapes and optionally contents of lora_output and lora_labels
+                    print(f"Adapter {i}: lora_output shape: {lora_output.shape}, lora_labels shape: {lora_labels.shape}")
+                    
+                    if previous_lora_output is not None:
+                        # Compute the difference between the current and previous lora_output
+                        diff = torch.abs(lora_output - previous_lora_output)
+                        print(f"Adapter {i}: Difference with previous lora_output (mean): {diff.mean().item()}")
+                        print(f"Adapter {i}: Difference with previous lora_output (max): {diff.max().item()}")
+
+                    # Update the previous_lora_output
+                    previous_lora_output = lora_output.detach().clone()
 
                     # Compute loss
                     # log.info("start computing loss")
                     loss = self._loss_fn(lora_output, lora_labels)
                     loss = loss / self._gradient_accumulation_steps
-                    running_loss += loss.item()
+                    running_loss.append(loss.item())
                     # log.info("finish computing loss")
 
-                    # Zero out gradients of LoRA parameters
+                    # Zero out all gradients
                     for module in lora_modules:
                         for idx, layer in enumerate(module.lora_a):
-                            layer.weight.grad = None  
+                            if idx == i:
+                                layer.weight.grad = None
                         for idx, layer in enumerate(module.lora_b):
-                            layer.weight.grad = None 
+                            if idx == i:
+                                layer.weight.grad = None
 
-                    # Compute gradients w.r.t. LoRA parameters
                     # log.info("start backward pass")
                     loss.backward(retain_graph=True)
                     # log.info("finish backward pass")
 
+                    # Apply masking to ensure only the current adapter's gradients are retained
                     for module in lora_modules:
                         for idx, layer in enumerate(module.lora_a):
-                            accum_lora_a_grads[module][idx] += layer.weight.grad.clone()
+                            if idx != i and layer.weight.grad is not None:
+                                layer.weight.grad.zero_()  # Mask gradients for inactive adapters
                         for idx, layer in enumerate(module.lora_b):
-                            accum_lora_b_grads[module][idx] += layer.weight.grad.clone()
-
-                # After processing all adapters, assign accumulated gradients
-                for module in lora_modules:
-                    for idx, layer in enumerate(module.lora_a):
-                        layer.weight.grad = accum_lora_a_grads[module][idx]  # Assign accumulated gradient to each lora_a layer
-                    for idx, layer in enumerate(module.lora_b):
-                        layer.weight.grad = accum_lora_b_grads[module][idx]  # Assign accumulated gradient to each lora_b layer
+                            if idx != i and layer.weight.grad is not None:
+                                layer.weight.grad.zero_()  # Mask gradients for inactive adapters
 
                 # Perform optimizer steps for each adapter
-                for adapter_idx in range(self.num_adapters):
-                    optimizer = self._optimizers[adapter_idx]
-                    scheduler = self._schedulers[adapter_idx]
+                # for adapter_idx in range(self.num_adapters):
+                    optimizer = self._optimizers[i]
+                    scheduler = self._schedulers[i]
                     # print(optimizer.param_groups[0]['params'])
                     torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
                     # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
+                    # Before optimizer step
+                    # for module in lora_modules:
+                    #     for idx, layer in enumerate(module.lora_a):
+                    #         print(f"Before step - Adapter {idx}: lora_a[{idx}] weight mean: {layer.weight.mean().item()}")
+
+                    # Optimizer step
                     optimizer.step()
+
+                    # After optimizer step
+                    for module in lora_modules:
+                        for idx, layer in enumerate(module.lora_a):
+                            if layer.weight.grad is not None:
+                                print(f"Adapter {idx}: lora_a[{idx}] grad mean: {layer.weight.grad.mean().item()}")
+                        for idx, layer in enumerate(module.lora_b):
+                            if layer.weight.grad is not None:
+                                print(f"Adapter {idx}: lora_b[{idx}] grad mean: {layer.weight.grad.mean().item()}")
+
+
                     optimizer.zero_grad()
                     scheduler.step()
 
@@ -1167,7 +1202,7 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
                     pbar.update(1)
                     pbar.set_description(
-                        f"{curr_epoch+1}|{self.global_step}|Loss: {running_loss:.4f}"
+                        f"{curr_epoch+1}|{self.global_step}|Loss: {running_loss[0]:.4f}|Loss: {running_loss[1]:.4f} "
                     )
 
                     if (

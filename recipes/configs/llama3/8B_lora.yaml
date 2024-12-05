@@ -29,7 +29,7 @@ model:
   apply_lora_to_mlp: True
   apply_lora_to_output: False
   lora_rank: [8, 8]  
-  lora_alpha: [16, 16]
+  lora_alpha: [8, 8]
   # lora_rank: [64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64]
   # lora_alpha: [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]
   bsz: 1
@@ -55,11 +55,13 @@ batch_size: 1
 # Optimizer and Scheduler
 optimizer:
   _component_: torch.optim.AdamW
-  weight_decay: 0.01
+  # weight_decay: 0.01
+  weight_decay: 0
   lr: 3e-4
 lr_scheduler:
   _component_: torchtune.modules.get_cosine_schedule_with_warmup
-  num_warmup_steps: 100
+  num_warmup_steps: 0
+  # num_warmup_steps: 100
 
 loss:
   _component_: torch.nn.CrossEntropyLoss
@@ -81,4 +83,4 @@ log_peak_memory_stats: False
 # Environment
 device: cuda
 dtype: bf16
-enable_activation_checkpointing: True
+enable_activation_checkpointing: False

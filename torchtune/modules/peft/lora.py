@@ -137,48 +137,15 @@ class LoRALinear(nn.Module, AdapterModule):
         """
         if self._quantize_base:
             out = linear_nf4(input=x, weight=self.weight)
+            if self.use_bias:
+                out = out + self.bias
         else:
             out = F.linear(x, self.weight, self.bias)
         if self.disabled:
             return out
-
-        # Handle first layer
-        # total_dim = len(self.rank) * 
-        # if x.shape[0] == 1:
-        lora_out = []
-        num_adapters = len(self.rank)
-        if x.shape[0] == self.bsz and num_adapters > 1:
-            x = x.repeat(num_adapters, 1, 1)
-        # print(f"Lora input dim after repeat is {x.shape}")
-        after_dropout = self.dropout(x)
-        bsz = x.shape[0] // num_adapters
-        # print(f"enter adapter loop")
-        for idx in range(num_adapters):
-            lora_a_slice = after_dropout[idx * bsz: (idx + 1) * bsz, :, :]
-            # print(f"lora_a_slice dim is {lora_a_slice.shape}")
-            lora_after_a = getattr(self, f'lora_a_{idx}')(lora_a_slice)
-            # print(f"Lora after a dim is {lora_after_a.shape}")
-            # print(f"out dim is {out.shape}")
-            lora_after_b = getattr(self, f'lora_b_{idx}')(lora_after_a)
-            # print(f"Lora after b dim is {lora_after_b.shape}")
-            scaled_results = (self.alpha[idx] / self.rank[idx]) * lora_after_b
-            # print(f"scaled_results dim is {scaled_results.shape}")
-            if out.shape[0] > self.bsz:
-                final_results = scaled_results + out[idx * bsz: (idx + 1) * bsz, :, :]
-            else:
-                final_results = scaled_results + out
-            # print(f"final_results dim is {final_results.shape}")
-            lora_out.append(final_results)
-
-        
-        # return lora_out
-        # lora_out = (self.alpha / self.rank) * self.lora_b(lora_out)
-        # for out in lora_out:
-        #     print(out.shape)
-        total_out = torch.stack(lora_out, dim=0)
-        print(total_out.shape)
-        
-        return total_out
+        lora_out = self.lora_a(self.dropout(x))
+        lora_out = (self.alpha / self.rank) * self.lora_b(lora_out)
+        return out + lora_out
 
 
 def _lora_a_init_params(x: nn.Linear) -> None:
@@ -193,6 +160,7 @@ def _lora_b_init_params(x: nn.Linear) -> None:
     Initialize LoRA B weight to zeros.
     """
     nn.init.zeros_(x.weight)
+    # nn.init.kaiming_uniform_(x.weight, a=math.sqrt(5))
 
 def _lora_a_list_init_params(x: nn.ModuleList) -> None:
     """
@@ -208,6 +176,7 @@ def _lora_b_list_init_params(x: nn.ModuleList) -> None:
     """
     for lora in x:
         nn.init.zeros_(lora.weight)
+        # nn.init.kaiming_uniform_(lora.weight, a=math.sqrt(5))
 
 
 
@@ -530,9 +499,25 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
 
         lora_outs = []
+        previous_lora_output = None
 
         # Process each LoRA adapter for W1 equivalent
         for i in range(len(self.rank)):
+            # print(f"Adapter {i}: lora_a[{i}] weight:")
+            # print(self.lora_a[i].weight)  # Print the full weight matrix (can be large)
+
+            # print(f"Adapter {i}: lora_b[{i}] weight:")
+            # print(self.lora_b[i].weight)  # Print the full weight matrix (can be large)
+
+            # # Optional: Print statistical properties to summarize weights
+            # print(f"Adapter {i}: lora_a[{i}] weight mean: {self.lora_a[i].weight.mean().item()}")
+            # print(f"Adapter {i}: lora_a[{i}] weight max: {self.lora_a[i].weight.max().item()}")
+            # print(f"Adapter {i}: lora_a[{i}] weight min: {self.lora_a[i].weight.min().item()}")
+
+            # print(f"Adapter {i}: lora_b[{i}] weight mean: {self.lora_b[i].weight.mean().item()}")
+            # print(f"Adapter {i}: lora_b[{i}] weight max: {self.lora_b[i].weight.max().item()}")
+            # print(f"Adapter {i}: lora_b[{i}] weight min: {self.lora_b[i].weight.min().item()}")
+
             input_i = x[i * bsz : (i + 1) * bsz, ...]
 
             # LoRA A1 (column-partitioned), apply dropout and projection
@@ -541,17 +526,6 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # print("get input")
             lora_a_out_i = self.lora_a[i](input_i)
             # print(f"finish lora a with shape {lora_a_out_i.shape}, type is {type(lora_a_out_i)}")
-            
-            # # Convert DTensor to local tensor before all_gather
-            # lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
-            # print(f"local lora a with shape {lora_a_out_i_local.shape}")
-
-            # gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
-            # dist.all_gather(gathered_lora_a_out, lora_a_out_i)
-
-            # lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
-            # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
-
 
             # Directly gather the DTensor without `to_local()`
             lora_a_out_i_dtensor = lora_a_out_i.redistribute(
@@ -559,23 +533,14 @@ class LoRALinearColCol(nn.Module, AdapterModule):
                 placements=[Replicate()]  # Adjust this if your shard is on a different dimension
             )
             # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
+            # print(f"Adapter {i}: lora_a[{i}] output mean: {lora_a_out_i.mean().item()}, max: {lora_a_out_i.max().item()}, min: {lora_a_out_i.min().item()}")
+            # print(f"Adapter {i}: lora_a[{i}] requires_grad: {self.lora_a[i].weight.requires_grad}")
 
-
-            # # Convert the output of lora_a to DTensor for distributed operation
-            # lora_a_out_i_dtensor = distribute_tensor(
-            #     lora_a_out_i, device_mesh=self.device_mesh, placements=[Shard(1)]
-            # )
 
             # LoRA B1 (column-partitioned) for QKV projection
             # print(f"lora a out shape is {lora_a_out_i_dtensor.shape}")
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
             # print(f"finish lora b out shape is {lora_b_out_i.shape}")
-
-            # lora_b_out_i_dtensor = distribute_tensor(
-            #     lora_b_out_i, device_mesh=self.device_mesh, placements=[Shard(1)]
-            # )
-
-            # print(f"lora_b_out_i_dtensor shape is {lora_b_out_i.shape}")
 
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
@@ -587,7 +552,22 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # base_out_local_i = base_out_i.to_local()
             # print(f"base_out_local_i shape is {base_out_local_i.shape}, type is {type(base_out_local_i)}")
             # print(f"scaled_lora_out_i shape is {scaled_lora_out_i.shape}, type is {type(scaled_lora_out_i)}")
+            lora_output_i = base_out_i + scaled_lora_out_i
             lora_outs.append(base_out_i + scaled_lora_out_i)
+
+            # if previous_lora_output is not None:
+            #     # Compute the difference between the current and previous lora_output
+            #     diff = torch.abs(lora_output_i - previous_lora_output)
+            #     print(f"Adapter {i}: Difference with previous lora_output (mean): {diff.mean().item()}")
+            #     print(f"Adapter {i}: Difference with previous lora_output (max): {diff.max().item()}")
+            # else:
+            #     diff = torch.abs(scaled_lora_out_i)
+            #     print(f"Adapter {i}: Difference with previous lora_output (mean): {diff.mean().item()}")
+            #     print(f"Adapter {i}: Difference with previous lora_output (max): {diff.max().item()}")
+
+            # # Update the previous_lora_output
+            # previous_lora_output = lora_output_i.detach().clone()
+
 
         concatenated_lora = torch.cat(lora_outs, dim=0)
         return concatenated_lora
@@ -755,6 +735,8 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
                 placements=[Replicate()]  # Adjust this if your shard is on a different dimension
             )
             # print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
+            # print(f"Adapter {i}: lora_a[{i}] output mean: {lora_a_out_i.mean().item()}, max: {lora_a_out_i.max().item()}, min: {lora_a_out_i.min().item()}")
+            # print(f"Adapter {i}: lora_a[{i}] requires_grad: {self.lora_a[i].weight.requires_grad}")
 
             # LoRA B2 (column-partitioned) for output projection
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
