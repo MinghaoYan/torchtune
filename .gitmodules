@@ -1,0 +1,3 @@
+[submodule "torchtune/third_party/cutlass"]
+	path = torchtune/third_party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
