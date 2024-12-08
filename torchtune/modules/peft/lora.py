@@ -19,6 +19,8 @@ from torch.distributed._tensor import DTensor, Shard, DeviceMesh, distribute_ten
 
 import torch.distributed as dist
 
+import cutlass
+
 class LoRALinear(nn.Module, AdapterModule):
     """LoRA linear layer as introduced in `LoRA: Low-Rank Adaptation of Large Language Models <https://arxiv.org/abs/2106.09685>`_.
 
