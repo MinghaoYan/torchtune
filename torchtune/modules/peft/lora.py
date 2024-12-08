@@ -529,76 +529,84 @@ class LoRALinearColCol(nn.Module, AdapterModule):
         if bsz == 0:
             raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
 
-        lora_outs = []
+        # Prepare inputs for grouped GEMM
+        dtype = torch.float16  # Assuming FP16; adjust as needed
+        plan_a = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
+        plan_b = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
 
-        # Process each LoRA adapter for W1 equivalent
+        As, Bs, lora_outs = [], [], []
+
+        # Process inputs for grouped GEMM (LoRA A projection)
         for i in range(len(self.rank)):
-            input_i = x[i * bsz : (i + 1) * bsz, ...]
-
-            # LoRA A1 (column-partitioned), apply dropout and projection
+            input_i = x[i * bsz : (i + 1) * bsz, ...]  # Split input for each adapter
             input_i = self.dropout(input_i)
-            # print(f"input shape is {input_i.shape}, lora_a[{i}] weight shape is {self.lora_a[i].weight.shape}")
-            # print("get input")
-            lora_a_out_i = self.lora_a[i](input_i)
-            # print(f"finish lora a with shape {lora_a_out_i.shape}, type is {type(lora_a_out_i)}")
 
+            As.append(input_i)  # Input matrices for GEMM
+            Bs.append(self.lora_a[i].weight.T)  # Transpose for GEMM
 
-            # Directly gather the DTensor without `to_local()`
+        # Run grouped GEMM for LoRA A
+        Ds_a = [torch.zeros_like(out) for out in As]  # Placeholders for GEMM outputs
+        plan_a.run(As, Bs, Ds_a, print_module=False)
+
+        # Prepare inputs for grouped GEMM (LoRA B projection)
+        As_b, Bs_b = [], []
+        for i, lora_a_out_i in enumerate(Ds_a):
+            # Redistribute the LoRA A output to match device mesh placement
             lora_a_out_i_dtensor = lora_a_out_i.redistribute(
                 device_mesh=self.device_mesh,
                 placements=[Replicate()]  # Adjust this if your shard is on a different dimension
             )
-            # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
+            As_b.append(lora_a_out_i_dtensor)
+            Bs_b.append(self.lora_b[i].weight.T)  # Transpose for GEMM
 
-            # print(f"lora a out shape is {lora_a_out_i_dtensor.shape}")
-            lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-            # print(f"finish lora b out shape is {lora_b_out_i.shape}")
+        # Run grouped GEMM for LoRA B
+        Ds_b = [torch.zeros_like(out) for out in As_b]  # Placeholders for GEMM outputs
+        plan_b.run(As_b, Bs_b, Ds_b, print_module=False)
 
+        # Combine results and finalize outputs
+        for i, lora_b_out_i in enumerate(Ds_b):
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
             # Combine with base model output
-            # print(f"out shape is {out.shape}, type is {type(out)}")
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
+        # Concatenate outputs along the batch dimension
         concatenated_lora = torch.cat(lora_outs, dim=0)
         return concatenated_lora
 
-        input_i = self.dropout(input_i)
-        lora_a_out_i = self.lora_a[i](input_i)
 
     
 
-def add_lora_sgmv_cutlass(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    wa_ptr: torch.Tensor,
-    wb_ptr: torch.Tensor,
-    s: torch.Tensor,
-    lora_rank: int,
-):
-    """
-  Semantics:
-    y[s[i]:s[i+1]] += x[s[i]:s[i+1]] @ deref(wa_ptr[i]) @ deref(wb_ptr[i])
+# def add_lora_sgmv_cutlass(
+#     y: torch.Tensor,
+#     x: torch.Tensor,
+#     wa_ptr: torch.Tensor,
+#     wb_ptr: torch.Tensor,
+#     s: torch.Tensor,
+#     lora_rank: int,
+# ):
+#     """
+#   Semantics:
+#     y[s[i]:s[i+1]] += x[s[i]:s[i+1]] @ deref(wa_ptr[i]) @ deref(wb_ptr[i])
 
-  Args:
-    y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
-    x: Shape: `[B, H1]`. Input vectors.
-    wa_ptr: Shape: `[S]`. DType: torch.int64. Pointer to the weight matrices.\
-      Weight matrix shape: `[num_layers, H1, R]`.
-    wb_ptr: Shape: `[S]`. DType: torch.int64. Pointer to the weight matrices.\
-      Weight matrix shape: `[num_layers, R, H2]`.
-    s: Shape: `[S+1]`, DType: torch.int32. Indptr of the weight matrices.\
-      `s[0] == 0`, `s[-1] == B`.
-    layer_idx: Layer index of the weight matrices.
-  """
-    tmp_size = _kernels.sgmv_cutlass_tmp_size(wa_ptr.size(0))
-    tmp = torch.empty((tmp_size,), dtype=torch.uint8, device=x.device)
-    v = torch.zeros((x.size(0), lora_rank), dtype=x.dtype, device=x.device)
-    _kernels.sgmv_cutlass(v, x, wa_ptr, s, tmp)
-    _kernels.sgmv_cutlass(y, v, wb_ptr, s, tmp)
+#   Args:
+#     y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
+#     x: Shape: `[B, H1]`. Input vectors.
+#     wa_ptr: Shape: `[S]`. DType: torch.int64. Pointer to the weight matrices.\
+#       Weight matrix shape: `[num_layers, H1, R]`.
+#     wb_ptr: Shape: `[S]`. DType: torch.int64. Pointer to the weight matrices.\
+#       Weight matrix shape: `[num_layers, R, H2]`.
+#     s: Shape: `[S+1]`, DType: torch.int32. Indptr of the weight matrices.\
+#       `s[0] == 0`, `s[-1] == B`.
+#     layer_idx: Layer index of the weight matrices.
+#   """
+#     tmp_size = _kernels.sgmv_cutlass_tmp_size(wa_ptr.size(0))
+#     tmp = torch.empty((tmp_size,), dtype=torch.uint8, device=x.device)
+#     v = torch.zeros((x.size(0), lora_rank), dtype=x.dtype, device=x.device)
+#     _kernels.sgmv_cutlass(v, x, wa_ptr, s, tmp)
+#     _kernels.sgmv_cutlass(y, v, wb_ptr, s, tmp)
 
 
 class LoRALinearRowCol(nn.Module, AdapterModule):
@@ -732,7 +740,6 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
     def forward(self, x: Tensor, activated: int = 0):
         # Base model computation with row-partitioned base weight (W2 equivalent)
-        # print(f"input dimension is {x.shape}, type is {type(x)}, weight dimension is {self.weight.shape}, type is {type(self.weight)}")
         if self._quantize_base:
             out = linear_nf4(input=x, weight=self.weight)
         else:
@@ -743,73 +750,67 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
         bsz = x.shape[0] // len(self.rank)
         if bsz == 0:
-            raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
-
-        lora_outs = []
-
-        for i in range(len(self.rank)):
-            input_i = x[i * bsz : (i + 1) * bsz, ...]
-
-            # LoRA A2 (row-partitioned), apply dropout and projection
-            input_i = self.dropout(input_i)
-            # print(f"input dimension is {input_i.shape}, local dim is {input_i.to_local().shape}, placement is {input_i.placements}")
-            lora_a_out_i = self.lora_a[i](input_i)
-            # print(f"lora_a_out_i dimension is {lora_a_out_i.shape}, local dim is {lora_a_out_i.to_local().shape}, placement is {lora_a_out_i.placements}")
-            # All-reduce after A2 to accumulate across ranks
-            # dist.all_reduce(lora_a_out_i, op=dist.ReduceOp.SUM)
-            lora_a_out_i_dtensor = lora_a_out_i.redistribute(
-                device_mesh=self.device_mesh,
-                placements=[Replicate()]  # Adjust this if your shard is on a different dimension
+            raise ValueError(
+                f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}"
             )
-            # print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
 
-            # LoRA B2 (column-partitioned) for output projection
-            lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-            # print(f"lora_a_out_i_dtensor dimension is {lora_a_out_i_dtensor.shape}, local dim is {lora_a_out_i_dtensor.to_local().shape}, placement is {lora_a_out_i_dtensor.placements}")
-            # Scale LoRA output
-            scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
+        # Slice inputs for each adapter and apply dropout
+        input_slices = [x[i * bsz : (i + 1) * bsz, ...] for i in range(len(self.rank))]
+        input_slices = [self.dropout(in_i) for in_i in input_slices]
 
-            # Combine with base model output
-            base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-            # base_out_i = base_out_i.to(scaled_lora_out_i.device)
-            lora_outs.append(base_out_i + scaled_lora_out_i)
+        dtype = torch.float16  # Assuming FP16; adjust as needed
+        plan_a = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
+        plan_b = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
 
-        # Define a function to handle each loop iteration
-        # def lora_iteration(i, x, bsz, self):
-        #     input_i = x[i * bsz : (i + 1) * bsz, ...]
-            
-        #     # Apply dropout and LoRA A2 projection
-        #     input_i = self.dropout(input_i)
-        #     lora_a_out_i = self.lora_a[i](input_i)
-            
-        #     # Redistribute (all-reduce)
-        #     lora_a_out_i_dtensor = lora_a_out_i.redistribute(
-        #         device_mesh=self.device_mesh,
-        #         placements=[Replicate()]
-        #     )
-            
-        #     # LoRA B2 projection
-        #     lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
-            
-        #     # Scale output
-        #     scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
-            
-        #     # Combine with base model output
-        #     base_out_i = self.out[i * bsz : (i + 1) * bsz, ...]
-        #     base_out_i = base_out_i.to(scaled_lora_out_i.device)
-            
-        #     return base_out_i + scaled_lora_out_i
+        # --- Grouped GEMM for LoRA A ---
+        # A: input_slices (M, K)
+        # B: lora_a[i].weight (out_features, in_features) usually
+        # Make sure no transpose is needed; if needed, adjust accordingly.
+        As_a = input_slices
+        Bs_a = [self.lora_a[i].weight for i in range(len(self.rank))]
 
-        # # Main loop using torch.jit.fork
-        # lora_outs = []
-        # futures = []
+        # C and D for LoRA A GEMM
+        # Create Cs as zero-initialized tensors
+        Cs_a = [torch.zeros(a.size(0), w.size(0), device=a.device, dtype=a.dtype) for a, w in zip(As_a, Bs_a)]
+        Ds_a = [torch.empty_like(c) for c in Cs_a]
 
-        # for i in range(len(self.rank)):
-        #     future = torch.jit.fork(lora_iteration, i, x, bsz, self)
-        #     futures.append(future)
+        # Run grouped GEMM for lora_a
+        plan_a.run(As_a, Bs_a, Cs_a, Ds_a, print_module=False)
 
-        # # Wait for all tasks to complete and collect results
-        # lora_outs = [torch.jit.wait(fut) for fut in futures]
+        # Ds_a now contains all lora_a_out_i
+        # Redistribute if needed
+        lora_a_out_dtensors = [
+            lora_a_out_i.redistribute(
+                device_mesh=self.device_mesh,
+                placements=[Replicate()]
+            )
+            for lora_a_out_i in Ds_a
+        ]
+
+        # --- Grouped GEMM for LoRA B ---
+        # Now we take lora_a_out_dtensors as A for the next GEMM
+        # A: lora_a_out_dtensors (M, K)
+        # B: lora_b[i].weight (out_features, in_features)
+        # Ensure shapes align. Typically, lora_b weights have shape (out_features, in_features).
+        # If needed, transpose or confirm dimensions so that the multiplication is (M, K) * (K, N).
+        As_b = lora_a_out_dtensors
+        Bs_b = [self.lora_b[i].weight for i in range(len(self.rank))]
+
+        Cs_b = [torch.zeros(a.size(0), w.size(0), device=a.device, dtype=a.dtype) for a, w in zip(As_b, Bs_b)]
+        Ds_b = [torch.empty_like(c) for c in Cs_b]
+
+        # Run grouped GEMM for lora_b
+        plan_b.run(As_b, Bs_b, Cs_b, Ds_b, print_module=False)
+
+        # Ds_b now contains lora_b_out_i results
+        # Scale LoRA outputs
+        scaled_lora_outs = [(self.alpha[i] / self.rank[i]) * Ds_b[i] for i in range(len(self.rank))]
+
+        # Combine with base model output
+        lora_outs = [
+            out[i * bsz : (i + 1) * bsz, ...] + scaled_lora_outs[i]
+            for i in range(len(self.rank))
+        ]
 
         concatenated_lora = torch.cat(lora_outs, dim=0)
         return concatenated_lora
