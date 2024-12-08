@@ -1088,55 +1088,9 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
                 bsz = tokens.size(0)
 
-                # Initialize accumulators for gradients
-                # print(f"lora_modules are {lora_modules}")
-                # Creating gradient accumulators for each Linear layer in lora_a and lora_b
-                accum_lora_a_grads = {}
-                accum_lora_b_grads = {}
-
-                for module in lora_modules:  # lora_modules is a list of LoRALinearRowCol modules
-                    # Create a list of gradient tensors for each Linear layer in lora_a
-                    accum_lora_a_grads[module] = [torch.zeros_like(layer.weight) for layer in module.lora_a]
-                    # Create a list of gradient tensors for each Linear layer in lora_b
-                    accum_lora_b_grads[module] = [torch.zeros_like(layer.weight) for layer in module.lora_b]
-
-
-                # Perform separate backward passes for each adapter
-                for i in range(self.num_adapters):
-                    lora_output = logits[i * bsz:(i + 1) * bsz, ...]
-                    lora_labels = labels_shifted[i * bsz:(i + 1) * bsz, ...]
-
-                    # Compute loss
-                    # log.info("start computing loss")
-                    loss = self._loss_fn(lora_output, lora_labels)
-                    loss = loss / self._gradient_accumulation_steps
-                    running_loss += loss.item()
-                    # log.info("finish computing loss")
-
-                    # Zero out gradients of LoRA parameters
-                    for module in lora_modules:
-                        for idx, layer in enumerate(module.lora_a):
-                            layer.weight.grad = None  
-                        for idx, layer in enumerate(module.lora_b):
-                            layer.weight.grad = None 
-
-                    # Compute gradients w.r.t. LoRA parameters
-                    # log.info("start backward pass")
-                    loss.backward(retain_graph=True)
-                    # log.info("finish backward pass")
-
-                    for module in lora_modules:
-                        for idx, layer in enumerate(module.lora_a):
-                            accum_lora_a_grads[module][idx] += layer.weight.grad.clone()
-                        for idx, layer in enumerate(module.lora_b):
-                            accum_lora_b_grads[module][idx] += layer.weight.grad.clone()
-
-                # After processing all adapters, assign accumulated gradients
-                for module in lora_modules:
-                    for idx, layer in enumerate(module.lora_a):
-                        layer.weight.grad = accum_lora_a_grads[module][idx]  # Assign accumulated gradient to each lora_a layer
-                    for idx, layer in enumerate(module.lora_b):
-                        layer.weight.grad = accum_lora_b_grads[module][idx]  # Assign accumulated gradient to each lora_b layer
+                loss = self._loss_fn(logits, labels_shifted)
+                loss = loss / self._gradient_accumulation_steps
+                loss.backward()
 
                 # Perform optimizer steps for each adapter
                 for adapter_idx in range(self.num_adapters):

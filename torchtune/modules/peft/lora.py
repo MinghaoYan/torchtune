@@ -541,16 +541,6 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # print("get input")
             lora_a_out_i = self.lora_a[i](input_i)
             # print(f"finish lora a with shape {lora_a_out_i.shape}, type is {type(lora_a_out_i)}")
-            
-            # # Convert DTensor to local tensor before all_gather
-            # lora_a_out_i_local = lora_a_out_i.to_local()  # Use local tensor for all_gather
-            # print(f"local lora a with shape {lora_a_out_i_local.shape}")
-
-            # gathered_lora_a_out = [torch.empty_like(lora_a_out_i) for _ in range(dist.get_world_size())]
-            # dist.all_gather(gathered_lora_a_out, lora_a_out_i)
-
-            # lora_a_out_i = torch.cat(gathered_lora_a_out, dim=-1)
-            # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
 
 
             # Directly gather the DTensor without `to_local()`
@@ -560,22 +550,9 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             )
             # print(f"finish lora a gather with shape {lora_a_out_i.shape}")
 
-
-            # # Convert the output of lora_a to DTensor for distributed operation
-            # lora_a_out_i_dtensor = distribute_tensor(
-            #     lora_a_out_i, device_mesh=self.device_mesh, placements=[Shard(1)]
-            # )
-
-            # LoRA B1 (column-partitioned) for QKV projection
             # print(f"lora a out shape is {lora_a_out_i_dtensor.shape}")
             lora_b_out_i = self.lora_b[i](lora_a_out_i_dtensor)
             # print(f"finish lora b out shape is {lora_b_out_i.shape}")
-
-            # lora_b_out_i_dtensor = distribute_tensor(
-            #     lora_b_out_i, device_mesh=self.device_mesh, placements=[Shard(1)]
-            # )
-
-            # print(f"lora_b_out_i_dtensor shape is {lora_b_out_i.shape}")
 
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
@@ -583,16 +560,46 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             # Combine with base model output
             # print(f"out shape is {out.shape}, type is {type(out)}")
             base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-            # print(f"base_out_i shape is {base_out_i.shape}, type is {type(base_out_i)}")
-            # base_out_local_i = base_out_i.to_local()
-            # print(f"base_out_local_i shape is {base_out_local_i.shape}, type is {type(base_out_local_i)}")
-            # print(f"scaled_lora_out_i shape is {scaled_lora_out_i.shape}, type is {type(scaled_lora_out_i)}")
+
             lora_outs.append(base_out_i + scaled_lora_out_i)
 
         concatenated_lora = torch.cat(lora_outs, dim=0)
         return concatenated_lora
 
+        input_i = self.dropout(input_i)
+        lora_a_out_i = self.lora_a[i](input_i)
+
     
+
+def add_lora_sgmv_cutlass(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_ptr: torch.Tensor,
+    wb_ptr: torch.Tensor,
+    s: torch.Tensor,
+    lora_rank: int,
+):
+    """
+  Semantics:
+    y[s[i]:s[i+1]] += x[s[i]:s[i+1]] @ deref(wa_ptr[i]) @ deref(wb_ptr[i])
+
+  Args:
+    y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
+    x: Shape: `[B, H1]`. Input vectors.
+    wa_ptr: Shape: `[S]`. DType: torch.int64. Pointer to the weight matrices.\
+      Weight matrix shape: `[num_layers, H1, R]`.
+    wb_ptr: Shape: `[S]`. DType: torch.int64. Pointer to the weight matrices.\
+      Weight matrix shape: `[num_layers, R, H2]`.
+    s: Shape: `[S+1]`, DType: torch.int32. Indptr of the weight matrices.\
+      `s[0] == 0`, `s[-1] == B`.
+    layer_idx: Layer index of the weight matrices.
+  """
+    tmp_size = _kernels.sgmv_cutlass_tmp_size(wa_ptr.size(0))
+    tmp = torch.empty((tmp_size,), dtype=torch.uint8, device=x.device)
+    v = torch.zeros((x.size(0), lora_rank), dtype=x.dtype, device=x.device)
+    _kernels.sgmv_cutlass(v, x, wa_ptr, s, tmp)
+    _kernels.sgmv_cutlass(y, v, wb_ptr, s, tmp)
+
 
 class LoRALinearRowCol(nn.Module, AdapterModule):
     """LoRA linear layer as introduced in `LoRA: Low-Rank Adaptation of Large Language Models <https://arxiv.org/abs/2106.09685>`_.
