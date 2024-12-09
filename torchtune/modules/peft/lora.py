@@ -560,25 +560,58 @@ class LoRALinearColCol(nn.Module, AdapterModule):
 
         plan_a.run(As_a, Bs_a, Cs_a, Ds_a, print_module=False)
 
-        # Prepare inputs for grouped GEMM (LoRA B projection)
+        # Convert Ds_a back to DTensor if needed for distribution
+        # After plan_a.run and creating Ds_a_dtensor
+        Ds_a_dtensor = [
+            DTensor.from_local(d, device_mesh=self.device_mesh, placements=[Shard(1)])
+            for d in Ds_a
+        ]
+
+        # Now perform all_gather by redistributing to Replicate placement.
+        Ds_a_gathered = [
+            d.redistribute(device_mesh=self.device_mesh, placements=[Replicate()])
+            for d in Ds_a_dtensor
+        ]
+
+        # Ds_a_gathered now have the full LoRA rank dimension combined from all ranks.
+
+        # LoRA B projection:
+        # LoRA B weight: (d/N, r) or (r, d/N) depending on how you partitioned d. 
+        # Typically LoRA B is (out_features, r), column partitioned along out_features => (d/N, r)
+        # For GEMM: (B, r) * (r, d/N) = (B, d/N)
+
         As_b, Bs_b = [], []
-        for i, lora_a_out_i in enumerate(Ds_a):
-            # Redistribute the LoRA A output to match device mesh placement
-            lora_a_out_i_dtensor = lora_a_out_i.redistribute(
-                device_mesh=self.device_mesh,
-                placements=[Replicate()]  # Adjust this if your shard is on a different dimension
-            )
-            As_b.append(lora_a_out_i_dtensor)
-            Bs_b.append(self.lora_b[i].weight.T)  # Transpose for GEMM
+        for i, lora_a_out_i_dtensor in enumerate(Ds_a_gathered):
+            # Convert to local for GEMM
+            lora_a_out_i_local = lora_a_out_i_dtensor.to_local().contiguous()  # (B*seq_len, r)
+
+            # LoRA B weight is (d/N, r) or (r, d/N). Typically original is (d, r).
+            # After column-part: (d/N, r).
+            # For GEMM: we want (r, d/N) to get (B, d/N).
+            lora_b_weight_local = self.lora_b[i].weight.to_local().contiguous()
+            # If originally (d/N, r), transpose to (r, d/N)
+            lora_b_weight_local = lora_b_weight_local.T
+
+            As_b.append(lora_a_out_i_local)     # (M, K) = (B*seq_len, r)
+            Bs_b.append(lora_b_weight_local)    # (K, N) = (r, d/N)
+
 
         # Run grouped GEMM for LoRA B
-        Cs_b = [torch.zeros(a.size(0), w.size(0), device=a.device, dtype=a.dtype) for a, w in zip(As_b, Bs_b)]
+        Cs_b = [torch.zeros(a.size(0), w.size(1), device=a.device, dtype=a.dtype) for a, w in zip(As_b, Bs_b)]
         Ds_b = [torch.empty_like(c) for c in Cs_b]
+
+        for i, (a, b, c, d) in enumerate(zip(As_b, Bs_b, Cs_b, Ds_b)):
+            print(f"Adapter {i}: A shape: {a.shape}, B shape: {b.shape}, C shape: {c.shape}, D shape: {d.shape}")
+            print(f"Adapter {i}: A dtype: {a.dtype}, B dtype: {b.dtype}, C dtype: {c.dtype}, D dtype: {d.dtype}")
 
         plan_b.run(As_b, Bs_b, Cs_b, Ds_b, print_module=False)
 
+        # print("plan B finishes")
+
+        Ds_b_reshaped = [d.view(bsz, d.size(0) // bsz, -1) for d in Ds_b]
+
         # Combine results and finalize outputs
-        for i, lora_b_out_i in enumerate(Ds_b):
+        for i, lora_b_out_i in enumerate(Ds_b_reshaped):
             # Scale LoRA output
             scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
 
