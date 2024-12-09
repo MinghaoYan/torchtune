@@ -15,7 +15,7 @@ from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 from torchtune.modules.peft.peft_utils import AdapterModule
 from torchtune import utils
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed._tensor import DTensor, Shard, DeviceMesh, distribute_tensor, Replicate
+from torch.distributed._tensor import DTensor, Shard, DeviceMesh, distribute_tensor, Replicate, Partial
 
 import torch.distributed as dist
 
@@ -633,22 +633,10 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             DTensor.from_local(
                 d.view(bsz, seq_len, -1),  # Reshape to (bsz, seq_len, d/N)
                 device_mesh=self.device_mesh,
-                placements=[Shard(-1)]
+                placements=[Replicate()]
             ) for d in Ds_b_gathered
             # .redistribute(placements=[Replicate()]) 
         ]
-        # Combine results and finalize outputs
-        # for i, lora_b_out_i in enumerate(Ds_b_reshaped):
-        #     # Scale LoRA output
-        #     scaled_lora_out_i = (self.alpha[i] / self.rank[i]) * lora_b_out_i
-
-        #     # Combine with base model output
-        #     base_out_i = out[i * bsz : (i + 1) * bsz, ...]
-        #     print(f"Adapter {i}: Base shape: {base_out_i.shape}, type is {type(base_out_i)} scaled shape: {scaled_lora_out_i.shape}, type is {type(scaled_lora_out_i)}")
-        #     # if base_out_i.placements != scaled_lora_out_i.placements:
-        #     print(f"Base placement is {base_out_i.placements}, scaled placement is {scaled_lora_out_i.placements}")
-        #     print(f"Adapter {i}: Base local shape: {base_out_i.to_local().shape}, Scaled local shape: {scaled_lora_out_i.to_local().shape}")
-        #     lora_outs.append(base_out_i + scaled_lora_out_i)
 
         # Final scaled outputs (scale the result after GEMM)
         lora_outs = []
@@ -845,10 +833,17 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
         # LoRA A projection (row-partitioned)
         As_a, Bs_a = [], []
         for i in range(len(self.rank)):
-            input_i = x[i * bsz : (i + 1) * bsz, ...]
+            # Access the local shard of the input
+            input_local = x.to_local()  # Local shard of `x` (sharded along dim=2)
+            print(f"Input shard (local): {input_local.shape}")
+
+            input_i = input_local[i * bsz : (i + 1) * bsz, ...]
             input_i = self.dropout(input_i)
+
+            print(f"input is {input_i.shape} type {type(input_i)}, placements {input_i.placements}")
             # Flatten (B, seq_len, h/N) -> (B*seq_len, h/N)
-            a_local = input_i.to_local().contiguous().view(-1, input_i.size(-1))
+            a_local = input_i.contiguous().view(-1, input_i.size(-1))
+            print(f"a local shape is {a_local.shape}")
 
             # LoRA A weight is row-partitioned (e.g., (r, h/N)), transpose if needed
             lora_a_w_local = self.lora_a[i].weight.to_local().contiguous().T
@@ -864,6 +859,8 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
         plan_a.run(As_a, Bs_a, Cs_a, Ds_a, print_module=False)
 
+        print("plan A finishes")
+
         # Convert Ds_a into a DTensor with Partial placement to represent partial sums from row partitioning
         # Assume partial sums along the "r" dimension (which is now Ds_a's second dimension)
         Ds_a_dtensor = [
@@ -876,6 +873,8 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
             d.redistribute(device_mesh=self.device_mesh, placements=[Replicate()])
             for d in Ds_a_dtensor
         ]
+
+        print("redistribute Ds_a")
 
         # LoRA B projection (column-partitioned)
         # After LoRA A, we have a fully reduced (summed) output (B*seq_len, r)

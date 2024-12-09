@@ -40,6 +40,8 @@ import math
 
 import torch.distributed as dist
 
+from torch.distributed.tensor.experimental import implicit_replication
+
 log = utils.get_logger("DEBUG")
 
 
@@ -1013,144 +1015,145 @@ class LoRAFinetuneRecipeTPDistributed(FTRecipeInterface):
 
         self._profiler.start()
 
-        for curr_epoch in range(self.epochs_run, self.total_epochs):
+        with implicit_replication():
+            for curr_epoch in range(self.epochs_run, self.total_epochs):
 
-            pbar = tqdm(total=self._steps_per_epoch, disable=not (rank == 0))
-            for idx, batch in enumerate(self._dataloader):
-                if (
-                    self.max_steps_per_epoch is not None
-                    and (idx // self._gradient_accumulation_steps)
-                    == self.max_steps_per_epoch
-                ):
-                    break
+                pbar = tqdm(total=self._steps_per_epoch, disable=not (rank == 0))
+                for idx, batch in enumerate(self._dataloader):
+                    if (
+                        self.max_steps_per_epoch is not None
+                        and (idx // self._gradient_accumulation_steps)
+                        == self.max_steps_per_epoch
+                    ):
+                        break
 
-                tokens, labels = batch["tokens"], batch["labels"]
-                mask = batch.get("mask", None)
-                input_pos = batch.get("input_pos", None)
+                    tokens, labels = batch["tokens"], batch["labels"]
+                    mask = batch.get("mask", None)
+                    input_pos = batch.get("input_pos", None)
 
-                tokens = tokens.to(self._device)
-                num_tokens += tokens.numel()
-                labels = labels.to(self._device)
-                mask = mask.to(self._device) if mask is not None else None
-                input_pos = (
-                    input_pos.to(self._device) if input_pos is not None else None
-                )
-
-                # Repeat inputs for all adapters
-                tokens_repeated = tokens.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
-                labels_repeated = labels.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
-                if mask is not None:
-                    mask_repeated = mask.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
-                else:
-                    mask_repeated = None
-                if input_pos is not None:
-                    input_pos_repeated = input_pos.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
-                else:
-                    input_pos_repeated = None
-
-                max_seq_len = tokens_repeated.shape[1]
-                if max_seq_len % self.device_mesh.size(0) != 0:
-                    # Calculate padding to make sequence length divisible by the number of ranks
-                    pad_len = self.device_mesh.size(0) - (max_seq_len % self.device_mesh.size(0))
-                    tokens_repeated = F.pad(tokens_repeated, (0, pad_len))  # pad on sequence dimension
-                    labels_repeated = F.pad(labels_repeated, (0, pad_len))
-
-                print(f"tokens_repeated shape is {tokens_repeated.shape}")
-                # Ensure tokens_repeated is fully replicated before embedding layer
-                tokens_repeated = DTensor.from_local(
-                    tokens_repeated.contiguous(),
-                    device_mesh=self.device_mesh,
-                    placements=[Replicate()]  # Ensure full replication across ranks
-                )
-
-                # # Move to the correct device
-                # tokens_repeated = tokens_repeated.to(self.device_mesh.device_type)
-
-                # Repeat for labels, mask, and input_pos
-                shards = labels_repeated.chunk(self.device_mesh.size(0), dim=0)
-                local_shard = shards[self.device_mesh.get_rank()]
-                labels_repeated = DTensor.from_local(
-                    local_shard.contiguous(),
-                    device_mesh=self.device_mesh,
-                    placements=[Shard(0)]
-                )
-                labels_repeated = labels_repeated.to(self.device_mesh.device_type)
-
-
-                # Perform one forward pass
-                log.info("start forward pass")
-                log.info(f"token repeated shape is {tokens_repeated.shape}")
-                logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
-                log.info("finish forward pass")
-                logits = logits[..., :-1, :].contiguous()
-                logits = logits.transpose(1, 2)
-                labels_shifted = labels_repeated[..., 1:].contiguous()
-
-                bsz = tokens.size(0)
-
-                loss = self._loss_fn(logits, labels_shifted)
-                loss = loss / self._gradient_accumulation_steps
-                loss.backward()
-
-                # Perform optimizer steps for each adapter
-                for adapter_idx in range(self.num_adapters):
-                    optimizer = self._optimizers[adapter_idx]
-                    scheduler = self._schedulers[adapter_idx]
-                    # print(optimizer.param_groups[0]['params'])
-                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
-                    # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()
-
-                # Clear intermediate variables to free memory
-                del logits, labels_shifted, tokens_repeated, labels_repeated
-                torch.cuda.empty_cache()
-
-                # Gradient accumulation and optimizer step
-                if (idx + 1) % self._gradient_accumulation_steps == 0:
-                    # Clip gradients if necessary
-                    # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
-
-                    # # Optimizer step
-                    # self._optimizer.step()
-                    # self._optimizer.zero_grad(set_to_none=True)
-                    # self._lr_scheduler.step()
-
-                    self.global_step += 1
-
-                    pbar.update(1)
-                    pbar.set_description(
-                        f"{curr_epoch+1}|{self.global_step}|Loss: {running_loss:.4f}"
+                    tokens = tokens.to(self._device)
+                    num_tokens += tokens.numel()
+                    labels = labels.to(self._device)
+                    mask = mask.to(self._device) if mask is not None else None
+                    input_pos = (
+                        input_pos.to(self._device) if input_pos is not None else None
                     )
 
-                    if (
-                        self.global_step % self._log_every_n_steps == 0
-                        and self._is_rank_zero
-                    ):
-                        time_per_step = time.perf_counter() - t0
-                        log_dict = {
-                            "loss": running_loss,
-                            "lr": self._optimizers[0].param_groups[0]["lr"],
-                            "tokens_per_second_per_gpu": num_tokens / time_per_step,
-                        }
-                        if self._log_peak_memory_stats:
-                            log_dict.update(utils.get_memory_stats(device=self._device))
-                        self._metric_logger.log_dict(
-                            log_dict,
-                            step=self.global_step,
+                    # Repeat inputs for all adapters
+                    tokens_repeated = tokens.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
+                    labels_repeated = labels.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
+                    if mask is not None:
+                        mask_repeated = mask.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
+                    else:
+                        mask_repeated = None
+                    if input_pos is not None:
+                        input_pos_repeated = input_pos.repeat(self.num_adapters, 1).to(self.device_mesh.device_type)
+                    else:
+                        input_pos_repeated = None
+
+                    max_seq_len = tokens_repeated.shape[1]
+                    if max_seq_len % self.device_mesh.size(0) != 0:
+                        # Calculate padding to make sequence length divisible by the number of ranks
+                        pad_len = self.device_mesh.size(0) - (max_seq_len % self.device_mesh.size(0))
+                        tokens_repeated = F.pad(tokens_repeated, (0, pad_len))  # pad on sequence dimension
+                        labels_repeated = F.pad(labels_repeated, (0, pad_len))
+
+                    print(f"tokens_repeated shape is {tokens_repeated.shape}")
+                    # Ensure tokens_repeated is fully replicated before embedding layer
+                    tokens_repeated = DTensor.from_local(
+                        tokens_repeated.contiguous(),
+                        device_mesh=self.device_mesh,
+                        placements=[Replicate()]  # Ensure full replication across ranks
+                    )
+
+                    # # Move to the correct device
+                    # tokens_repeated = tokens_repeated.to(self.device_mesh.device_type)
+
+                    # Repeat for labels, mask, and input_pos
+                    shards = labels_repeated.chunk(self.device_mesh.size(0), dim=0)
+                    local_shard = shards[self.device_mesh.get_rank()]
+                    labels_repeated = DTensor.from_local(
+                        local_shard.contiguous(),
+                        device_mesh=self.device_mesh,
+                        placements=[Shard(0)]
+                    )
+                    labels_repeated = labels_repeated.to(self.device_mesh.device_type)
+
+
+                    # Perform one forward pass
+                    log.info("start forward pass")
+                    log.info(f"token repeated shape is {tokens_repeated.shape}")
+                    logits = self._model(tokens_repeated, mask=mask_repeated, input_pos=input_pos_repeated)
+                    log.info("finish forward pass")
+                    logits = logits[..., :-1, :].contiguous()
+                    logits = logits.transpose(1, 2)
+                    labels_shifted = labels_repeated[..., 1:].contiguous()
+
+                    bsz = tokens.size(0)
+
+                    loss = self._loss_fn(logits, labels_shifted)
+                    loss = loss / self._gradient_accumulation_steps
+                    loss.backward()
+
+                    # Perform optimizer steps for each adapter
+                    for adapter_idx in range(self.num_adapters):
+                        optimizer = self._optimizers[adapter_idx]
+                        scheduler = self._schedulers[adapter_idx]
+                        # print(optimizer.param_groups[0]['params'])
+                        torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
+                        # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        scheduler.step()
+
+                    # Clear intermediate variables to free memory
+                    del logits, labels_shifted, tokens_repeated, labels_repeated
+                    torch.cuda.empty_cache()
+
+                    # Gradient accumulation and optimizer step
+                    if (idx + 1) % self._gradient_accumulation_steps == 0:
+                        # Clip gradients if necessary
+                        # torch.nn.utils.clip_grad_norm_(self.adapter_params, max_norm=1.0)
+
+                        # # Optimizer step
+                        # self._optimizer.step()
+                        # self._optimizer.zero_grad(set_to_none=True)
+                        # self._lr_scheduler.step()
+
+                        self.global_step += 1
+
+                        pbar.update(1)
+                        pbar.set_description(
+                            f"{curr_epoch+1}|{self.global_step}|Loss: {running_loss:.4f}"
                         )
 
-                    running_loss = 0
-                    num_tokens = 0
-                    t0 = time.perf_counter()
+                        if (
+                            self.global_step % self._log_every_n_steps == 0
+                            and self._is_rank_zero
+                        ):
+                            time_per_step = time.perf_counter() - t0
+                            log_dict = {
+                                "loss": running_loss,
+                                "lr": self._optimizers[0].param_groups[0]["lr"],
+                                "tokens_per_second_per_gpu": num_tokens / time_per_step,
+                            }
+                            if self._log_peak_memory_stats:
+                                log_dict.update(utils.get_memory_stats(device=self._device))
+                            self._metric_logger.log_dict(
+                                log_dict,
+                                step=self.global_step,
+                            )
 
-                    self._profiler.step()
+                        running_loss = 0
+                        num_tokens = 0
+                        t0 = time.perf_counter()
 
-            self.epochs_run += 1
-            self.save_checkpoint(epoch=curr_epoch)
+                        self._profiler.step()
 
-        self._profiler.stop()
+                self.epochs_run += 1
+                self.save_checkpoint(epoch=curr_epoch)
+
+            self._profiler.stop()
 
 
     def cleanup(self) -> None:

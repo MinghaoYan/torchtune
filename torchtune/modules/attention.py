@@ -171,7 +171,8 @@ class CausalSelfAttention(nn.Module):
         """
         xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
         xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-        freqs_cis = self.reshape_for_broadcast(freqs_cis, xq_).to(xq_.device)
+        freqs_cis = self.reshape_for_broadcast(freqs_cis, xq_)
+        # print(f"xq_ type:{type(xq_)}, freq_cis type: {type(freqs_cis)}")
         xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
         xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
         return xq_out.type_as(xq), xk_out.type_as(xk)
@@ -261,6 +262,7 @@ class CausalSelfAttention(nn.Module):
         v = v.reshape(bsz, seq_len, -1, self.head_dim)
 
         # Apply positional embeddings
+        # print(f"q shape: {q.shape}, q type: {type(q)}, k shape: {k.shape}, k type: {type(k)}")
         q, k = self.apply_rotary_emb(q, k, freqs_cis)
         # q = self.pos_embeddings(q, input_pos=input_pos)
         # k = self.pos_embeddings(k, input_pos=input_pos)
@@ -293,5 +295,5 @@ class CausalSelfAttention(nn.Module):
         # reshape the output to be the same shape as the input
         # print(f"output shape from attention is {output.shape}")
         output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
-        # print(f"output shape after transpose is {output.shape}")
+        print(f"output shape after transpose is {output.shape} type {type(output)}, placements {output.placements}")
         return self.output_proj(output)
