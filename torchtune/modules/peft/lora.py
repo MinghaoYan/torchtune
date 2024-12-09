@@ -532,23 +532,33 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             raise ValueError(f"Batch size per adapter is zero. x.shape[0]: {x.shape[0]}, len(self.rank): {len(self.rank)}")
 
         # Prepare inputs for grouped GEMM
-        dtype = torch.float16  # Assuming FP16; adjust as needed
-        plan_a = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
-        plan_b = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
+        plan_a = cutlass.op.GroupedGemm(element=x.dtype, layout=cutlass.LayoutType.RowMajor)
+        plan_b = cutlass.op.GroupedGemm(element=x.dtype, layout=cutlass.LayoutType.RowMajor)
 
-        As, Bs, lora_outs = [], [], []
+        As_a, Bs_a, lora_outs = [], [], []
 
         # Process inputs for grouped GEMM (LoRA A projection)
         for i in range(len(self.rank)):
             input_i = x[i * bsz : (i + 1) * bsz, ...]  # Split input for each adapter
             input_i = self.dropout(input_i)
 
-            As.append(input_i)  # Input matrices for GEMM
-            Bs.append(self.lora_a[i].weight.T)  # Transpose for GEMM
+            As_a.append(input_i)  # Input matrices for GEMM
+            Bs_a.append(self.lora_a[i].weight.T)  # Transpose for GEMM
+
+        As_a = [a.view(-1, a.size(-1)) for a in As_a]  # Flatten batch for GEMM
+
+        As_a = [a.to_local().contiguous() for a in As_a]
+        Bs_a = [b.to_local().contiguous() for b in Bs_a]
 
         # Run grouped GEMM for LoRA A
-        Ds_a = [torch.zeros_like(out) for out in As]  # Placeholders for GEMM outputs
-        plan_a.run(As, Bs, Ds_a, print_module=False)
+        Cs_a = [torch.zeros(a.size(0), w.size(1), device=a.device, dtype=a.dtype) for a, w in zip(As_a, Bs_a)]
+        Ds_a = [torch.empty_like(c) for c in Cs_a]
+
+        for i, (a, b, c, d) in enumerate(zip(As_a, Bs_a, Cs_a, Ds_a)):
+            print(f"Adapter {i}: A shape: {a.shape}, B shape: {b.shape}, C shape: {c.shape}, D shape: {d.shape}")
+            print(f"Adapter {i}: A dtype: {a.dtype}, B dtype: {b.dtype}, C dtype: {c.dtype}, D dtype: {d.dtype}")
+
+        plan_a.run(As_a, Bs_a, Cs_a, Ds_a, print_module=False)
 
         # Prepare inputs for grouped GEMM (LoRA B projection)
         As_b, Bs_b = [], []
@@ -562,8 +572,10 @@ class LoRALinearColCol(nn.Module, AdapterModule):
             Bs_b.append(self.lora_b[i].weight.T)  # Transpose for GEMM
 
         # Run grouped GEMM for LoRA B
-        Ds_b = [torch.zeros_like(out) for out in As_b]  # Placeholders for GEMM outputs
-        plan_b.run(As_b, Bs_b, Ds_b, print_module=False)
+        Cs_b = [torch.zeros(a.size(0), w.size(0), device=a.device, dtype=a.dtype) for a, w in zip(As_b, Bs_b)]
+        Ds_b = [torch.empty_like(c) for c in Cs_b]
+
+        plan_b.run(As_b, Bs_b, Cs_b, Ds_b, print_module=False)
 
         # Combine results and finalize outputs
         for i, lora_b_out_i in enumerate(Ds_b):
@@ -760,9 +772,9 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
         input_slices = [x[i * bsz : (i + 1) * bsz, ...] for i in range(len(self.rank))]
         input_slices = [self.dropout(in_i) for in_i in input_slices]
 
-        dtype = torch.float16  # Assuming FP16; adjust as needed
-        plan_a = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
-        plan_b = cutlass.op.GroupedGemm(element=dtype, layout=cutlass.LayoutType.RowMajor)
+        
+        plan_a = cutlass.op.GroupedGemm(element=x.dtype, layout=cutlass.LayoutType.RowMajor)
+        plan_b = cutlass.op.GroupedGemm(element=x.dtype, layout=cutlass.LayoutType.RowMajor)
 
         # --- Grouped GEMM for LoRA A ---
         # A: input_slices (M, K)
