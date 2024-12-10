@@ -832,39 +832,76 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
         # LoRA A projection (row-partitioned)
         As_a, Bs_a = [], []
-        for i in range(len(self.rank)):
-            # Access the local shard of the input
-            input_local = x.to_local()  # Local shard of `x` (sharded along dim=2)
-            print(f"Input shard (local): {input_local.shape}")
+        # Verify local shard of input
+        input_local = x.to_local()
+        assert input_local.is_contiguous(), "Input local shard is not contiguous!"
+        print(f"Input shard (local): {input_local.shape}")
 
+        # Prepare As_a and Bs_a
+        for i in range(len(self.rank)):
             input_i = input_local[i * bsz : (i + 1) * bsz, ...]
             input_i = self.dropout(input_i)
+            assert input_i.is_contiguous(), "Input_i is not contiguous!"
+            
+            a_local = input_i.view(-1, input_i.size(-1)).contiguous()
+            lora_a_w_local = self.lora_a[i].weight.to_local().T.contiguous()
 
-            print(f"input is {input_i.shape} type {type(input_i)}, placements {input_i.placements}")
-            # Flatten (B, seq_len, h/N) -> (B*seq_len, h/N)
-            a_local = input_i.contiguous().view(-1, input_i.size(-1))
-            print(f"a local shape is {a_local.shape}")
+            As_a.append(a_local)
+            Bs_a.append(lora_a_w_local)
 
-            # LoRA A weight is row-partitioned (e.g., (r, h/N)), transpose if needed
-            lora_a_w_local = self.lora_a[i].weight.to_local().contiguous().T
-            As_a.append(a_local)   # (M, K) = (B*seq_len, h/N)
-            Bs_a.append(lora_a_w_local)  # (K, r) = (h/N, r)
+        # Verify tensors
+        for i, (a, b) in enumerate(zip(As_a, Bs_a)):
+            print(f"Adapter {i}: A shape={a.shape}, B shape={b.shape}")
+            print(f"A contiguous={a.is_contiguous()}, B contiguous={b.is_contiguous()}")
+            assert not torch.isnan(a).any(), "Input A contains NaNs!"
+            assert not torch.isinf(a).any(), "Input A contains Infs!"
+            assert not torch.isnan(b).any(), "Input B contains NaNs!"
+            assert not torch.isinf(b).any(), "Input B contains Infs!"
 
-        Cs_a = [torch.zeros(a.size(0), b.size(1), device=a.device, dtype=a.dtype) for a, b in zip(As_a, Bs_a)]
-        Ds_a = [torch.empty_like(c) for c in Cs_a]
 
-        for i, (a, b, c, d) in enumerate(zip(As_a, Bs_a, Cs_a, Ds_a)):
-            print(f"Row Lora A Adapter {i}: A shape: {a.shape}, B shape: {b.shape}, C shape: {c.shape}, D shape: {d.shape}")
-            print(f"Row Lora A Adapter {i}: A dtype: {a.dtype}, B dtype: {b.dtype}, C dtype: {c.dtype}, D dtype: {d.dtype}")
+        # Initialize Cs_a and Ds_a
+        Cs_a = [torch.zeros(a.size(0), b.size(1), device=a.device, dtype=a.dtype).contiguous() for a, b in zip(As_a, Bs_a)]
+        Ds_a = [torch.empty_like(c).contiguous() for c in Cs_a]
 
-        plan_a.run(As_a, Bs_a, Cs_a, Ds_a, print_module=False)
+        # Verify Cs_a and Ds_a
+        for c, d in zip(Cs_a, Ds_a):
+            assert c.is_contiguous(), "C is not contiguous!"
+            assert d.is_contiguous(), "D is not contiguous!"
 
-        print("plan A finishes")
+        # # Verify if manual matrix multiplication works without errors
+        Ds_a = []
+        for i, (a, b) in enumerate(zip(As_a, Bs_a)):
+            print(f"Manual GEMM for Adapter {i}: A shape={a.shape}, B shape={b.shape}")
+            
+            # Perform manual matrix multiplication
+            try:
+                c = torch.mm(a, b)  # (M, K) * (K, N) -> (M, N)
+                print(f"Result shape for Adapter {i}: {c.shape}")
+                Ds_a.append(c)
+            except RuntimeError as e:
+                print(f"Manual GEMM failed for Adapter {i}: {e}")
+                raise
+
+        A = torch.randn(280, 2048, device='cuda', dtype=torch.float16)
+        B = torch.randn(2048, 8, device='cuda', dtype=torch.float16)
+        C = torch.zeros(280, 8, device='cuda', dtype=torch.float16)
+        D = torch.empty_like(C)
+
+        plan = cutlass.op.GroupedGemm(element=torch.float16, layout=cutlass.LayoutType.RowMajor)
+        plan.run([A], [B], [C], [D], print_module=False)
+
+        plan_a_fp16 = cutlass.op.GroupedGemm(element=torch.float16, layout=cutlass.LayoutType.RowMajor)
+        plan_a_fp16.run([As_a[0].half()], [Bs_a[0].half()], [Cs_a[0].half()], [Ds_a[0].half()], print_module=False)
+        print("run 0 finishes")
+        plan_a_fp16.run([As_a[1].half()], [Bs_a[1].half()], [Cs_a[1].half()], [Ds_a[1].half()], print_module=False)
+        print("run 1 finishes")
+        # plan_a.run(As_a, Bs_a, Cs_a, Ds_a, print_module=True)
+
 
         # Convert Ds_a into a DTensor with Partial placement to represent partial sums from row partitioning
         # Assume partial sums along the "r" dimension (which is now Ds_a's second dimension)
         Ds_a_dtensor = [
-            DTensor.from_local(d, device_mesh=self.device_mesh, placements=[Partial()]) 
+            DTensor.from_local(d, device_mesh=self.device_mesh, placements=[Partial(reduce_op="sum")]) 
             for d in Ds_a
         ]
 
@@ -902,7 +939,7 @@ class LoRALinearRowCol(nn.Module, AdapterModule):
 
         # After LoRA B, we have partial sums along the "d/N" dimension (since column-partitioned)
         Ds_b_dtensor = [
-            DTensor.from_local(d, device_mesh=self.device_mesh, placements=[Partial()]) 
+            DTensor.from_local(d, device_mesh=self.device_mesh, placements=[Partial(reduce_op="sum")]) 
             for d in Ds_b
         ]
 
